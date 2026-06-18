@@ -1,7 +1,9 @@
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -18,6 +20,59 @@ INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 INTENT_PAYMENT_APPLICATION_FEE = "payment_application_fee_quote"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 DEFAULT_SCHOOL_CODES = ("IIHS", "IISS", "IIBS")
+SCHOOL_TIME_ZONE = ZoneInfo("Asia/Jakarta")
+ID_MONTH_NAMES = {
+    1: "Januari",
+    2: "Februari",
+    3: "Maret",
+    4: "April",
+    5: "Mei",
+    6: "Juni",
+    7: "Juli",
+    8: "Agustus",
+    9: "September",
+    10: "Oktober",
+    11: "November",
+    12: "Desember",
+}
+MONTH_ALIASES = {
+    "jan": 1,
+    "januari": 1,
+    "january": 1,
+    "feb": 2,
+    "februari": 2,
+    "february": 2,
+    "mar": 3,
+    "maret": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "mei": 5,
+    "may": 5,
+    "jun": 6,
+    "juni": 6,
+    "june": 6,
+    "jul": 7,
+    "juli": 7,
+    "july": 7,
+    "agu": 8,
+    "agustus": 8,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "okt": 10,
+    "oktober": 10,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "des": 12,
+    "desember": 12,
+    "dec": 12,
+    "december": 12,
+}
 
 
 @dataclass
@@ -33,6 +88,13 @@ class ToolIntent:
     payment_status: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class DateRange:
+    start: datetime
+    end: datetime
+    label: str
+
+
 async def answer_from_school_tools(
     payload: ChatRequest,
     settings: Settings,
@@ -42,16 +104,17 @@ async def answer_from_school_tools(
         return None
 
     lowered = payload.message.casefold()
+    date_range = _date_range_from_message(lowered)
     intent = _deterministic_tool_intent(lowered)
     if intent.name == INTENT_NONE:
-        intent = _contextual_tool_intent(payload, lowered)
+        intent = _contextual_tool_intent(payload, lowered, date_range)
     if intent.name == INTENT_NONE:
         intent = await _classify_tool_intent(payload.message, settings)
 
     if intent.name == INTENT_ADMISSION_EOI_COUNT:
-        return await _admission_eoi_count(settings, authorization)
+        return await _admission_eoi_count(settings, authorization, date_range)
     if intent.name == INTENT_ADMISSION_LEADS_LIST:
-        return await _admission_leads_list(settings, authorization)
+        return await _admission_leads_list(settings, authorization, date_range)
     if intent.name == INTENT_ADMISSION_LEAD_CHILD_COUNT:
         return await _admission_lead_child_count(settings, authorization, payload, lowered)
     if intent.name == INTENT_ADMISSION_LEAD_STUDENTS_LIST:
@@ -84,15 +147,29 @@ def _deterministic_tool_intent(message: str) -> ToolIntent:
     return ToolIntent(INTENT_NONE)
 
 
-def _contextual_tool_intent(payload: ChatRequest, lowered_message: str) -> ToolIntent:
+def _contextual_tool_intent(
+    payload: ChatRequest,
+    lowered_message: str,
+    date_range: Optional[DateRange],
+) -> ToolIntent:
+    if date_range is not None and _asks_for_contextual_period_followup(lowered_message):
+        last_tool = _last_ok_tool_call(payload)
+        if last_tool == "admission.admin_leads_list":
+            return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
+        if last_tool == "admission.admin_leads_count":
+            return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
+
     if _asks_for_contextual_lead_child_identity(lowered_message) and _history_has_tool_call(
         payload,
         "admission.admin_lead_child_count",
     ):
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
-    if _asks_for_contextual_lead_identity(lowered_message) and _history_has_tool_call(
-        payload,
-        "admission.admin_leads_count",
+    if (
+        _asks_for_contextual_lead_identity(lowered_message)
+        or _asks_for_contextual_lead_detail(lowered_message)
+    ) and (
+        _history_has_tool_call(payload, "admission.admin_leads_count")
+        or _history_has_tool_call(payload, "admission.admin_leads_list")
     ):
         return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
     return ToolIntent(INTENT_NONE)
@@ -235,14 +312,22 @@ def _normalize_payment_status(value: Any) -> Optional[str]:
     return aliases.get(normalized) if normalized not in PAYMENT_STATUSES else normalized
 
 
-async def _admission_eoi_count(settings: Settings, authorization: Optional[str]) -> ToolAnswer:
+async def _admission_eoi_count(
+    settings: Settings,
+    authorization: Optional[str],
+    date_range: Optional[DateRange] = None,
+) -> ToolAnswer:
     tool_name = "admission.admin_leads_count"
     if not _has_bearer_token(authorization):
         return _auth_required(tool_name, "data EOI")
 
     url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
     try:
-        body = await _get_json(url, authorization, {"limit": "1", "offset": "0"})
+        body = await _get_json(
+            url,
+            authorization,
+            _lead_list_params(limit=1, offset=0, date_range=date_range),
+        )
         total = _extract_total(body)
     except httpx.HTTPStatusError as exc:
         auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
@@ -258,21 +343,30 @@ async def _admission_eoi_count(settings: Settings, authorization: Optional[str])
             "Saya belum bisa mengambil total EOI dari admission-service.",
         )
 
+    scope = f" {date_range.label}" if date_range is not None else ""
     return ToolAnswer(
-        answer=f"Ada {total} EOI terdaftar di admission-service.",
+        answer=f"Ada {total} EOI terdaftar{scope} di admission-service.",
         sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
 
 
-async def _admission_leads_list(settings: Settings, authorization: Optional[str]) -> ToolAnswer:
+async def _admission_leads_list(
+    settings: Settings,
+    authorization: Optional[str],
+    date_range: Optional[DateRange] = None,
+) -> ToolAnswer:
     tool_name = "admission.admin_leads_list"
     if not _has_bearer_token(authorization):
         return _auth_required(tool_name, "daftar EOI")
 
     url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
     try:
-        body = await _get_json(url, authorization, {"limit": "5", "offset": "0"})
+        body = await _get_json(
+            url,
+            authorization,
+            _lead_list_params(limit=5, offset=0, date_range=date_range),
+        )
         rows, total = _extract_lead_rows(body)
     except httpx.HTTPStatusError as exc:
         auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
@@ -288,11 +382,12 @@ async def _admission_leads_list(settings: Settings, authorization: Optional[str]
             "Saya belum bisa mengambil daftar EOI dari admission-service.",
         )
 
+    scope = f" {date_range.label}" if date_range is not None else ""
     if total == 0 or not rows:
-        answer = "Belum ada EOI terdaftar di admission-service."
+        answer = f"Belum ada EOI terdaftar{scope} di admission-service."
     else:
         shown = min(len(rows), 5)
-        lines = [f"Ada {total} EOI. Saya tampilkan {shown} yang terbaru:"]
+        lines = [f"Ada {total} EOI{scope}. Saya tampilkan {shown} yang terbaru:"]
         for index, row in enumerate(rows[:shown], start=1):
             name = _clean_text(row.get("parentName")) or "Nama belum tersedia"
             email = _clean_text(row.get("email"))
@@ -599,6 +694,18 @@ async def _find_lead_row(
     return (rows[0] if rows else None), total
 
 
+def _lead_list_params(
+    limit: int,
+    offset: int,
+    date_range: Optional[DateRange] = None,
+) -> dict[str, str]:
+    params = {"limit": str(limit), "offset": str(offset)}
+    if date_range is not None:
+        params["dateFrom"] = date_range.start.astimezone(timezone.utc).isoformat()
+        params["dateTo"] = date_range.end.astimezone(timezone.utc).isoformat()
+    return params
+
+
 def _extract_student_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
     data = body.get("data")
     if not isinstance(data, dict):
@@ -617,6 +724,125 @@ def _extract_fee_row(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(amount, int):
         raise ValueError("service response missing amount")
     return data
+
+
+def _date_range_from_message(message: str) -> Optional[DateRange]:
+    now = _now_jakarta()
+    today = now.date()
+
+    if any(term in message for term in ("hari ini", "today")):
+        return _single_day_range(today, "hari ini")
+    if any(term in message for term in ("kemarin", "yesterday")):
+        day = today - timedelta(days=1)
+        return _single_day_range(day, f"kemarin ({_format_day_label(day)})")
+    if any(term in message for term in ("bulan lalu", "last month")):
+        first_this_month = today.replace(day=1)
+        last_month_end = first_this_month - timedelta(days=1)
+        first_last_month = last_month_end.replace(day=1)
+        return _range_from_dates(
+            first_last_month,
+            first_this_month,
+            f"bulan lalu ({ID_MONTH_NAMES[first_last_month.month]} {first_last_month.year})",
+        )
+    if any(term in message for term in ("bulan ini", "this month")):
+        first_this_month = today.replace(day=1)
+        next_month = _add_month(first_this_month)
+        return _range_from_dates(
+            first_this_month,
+            next_month,
+            f"bulan ini ({ID_MONTH_NAMES[first_this_month.month]} {first_this_month.year})",
+        )
+
+    specific = _specific_date_from_message(message, now.year)
+    if specific is not None:
+        return _single_day_range(specific, _format_day_label(specific))
+
+    return None
+
+
+def _specific_date_from_message(message: str, default_year: int):
+    iso_match = re.search(r"\b(?P<year>20\d{2})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b", message)
+    if iso_match:
+        return _safe_date(
+            int(iso_match.group("year")),
+            int(iso_match.group("month")),
+            int(iso_match.group("day")),
+        )
+
+    slash_match = re.search(
+        r"\b(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{2,4}))?\b",
+        message,
+    )
+    if slash_match:
+        year = _normalize_year(slash_match.group("year"), default_year)
+        return _safe_date(year, int(slash_match.group("month")), int(slash_match.group("day")))
+
+    month_names = "|".join(sorted(MONTH_ALIASES, key=len, reverse=True))
+    day_month_match = re.search(
+        rf"\b(?P<day>\d{{1,2}})\s+(?P<month>{month_names})(?:\s+(?P<year>\d{{2,4}}))?\b",
+        message,
+    )
+    if day_month_match:
+        year = _normalize_year(day_month_match.group("year"), default_year)
+        return _safe_date(
+            year,
+            MONTH_ALIASES[day_month_match.group("month")],
+            int(day_month_match.group("day")),
+        )
+
+    month_day_match = re.search(
+        rf"\b(?P<month>{month_names})\s+(?P<day>\d{{1,2}})(?:,?\s+(?P<year>\d{{2,4}}))?\b",
+        message,
+    )
+    if month_day_match:
+        year = _normalize_year(month_day_match.group("year"), default_year)
+        return _safe_date(
+            year,
+            MONTH_ALIASES[month_day_match.group("month")],
+            int(month_day_match.group("day")),
+        )
+
+    return None
+
+
+def _single_day_range(day, label: str) -> DateRange:
+    return _range_from_dates(day, day + timedelta(days=1), label)
+
+
+def _range_from_dates(start_date, end_date, label: str) -> DateRange:
+    start = datetime.combine(start_date, datetime.min.time(), tzinfo=SCHOOL_TIME_ZONE)
+    end = datetime.combine(end_date, datetime.min.time(), tzinfo=SCHOOL_TIME_ZONE) - timedelta(
+        milliseconds=1
+    )
+    return DateRange(start=start, end=end, label=label)
+
+
+def _add_month(value):
+    if value.month == 12:
+        return value.replace(year=value.year + 1, month=1, day=1)
+    return value.replace(month=value.month + 1, day=1)
+
+
+def _format_day_label(day) -> str:
+    return f"{day.day} {ID_MONTH_NAMES[day.month]} {day.year}"
+
+
+def _normalize_year(value: Optional[str], default_year: int) -> int:
+    if not value:
+        return default_year
+    year = int(value)
+    return 2000 + year if year < 100 else year
+
+
+def _safe_date(year: int, month: int, day: int):
+    try:
+        return datetime(year, month, day, tzinfo=SCHOOL_TIME_ZONE).date()
+    except ValueError:
+        return None
+
+
+def _now_jakarta() -> datetime:
+    return datetime.now(SCHOOL_TIME_ZONE)
 
 
 def _asks_for_eoi_count(message: str) -> bool:
@@ -720,6 +946,42 @@ def _asks_for_contextual_lead_identity(message: str) -> bool:
     return any(term in message for term in followup_terms)
 
 
+def _asks_for_contextual_lead_detail(message: str) -> bool:
+    followup_terms = (
+        "detail",
+        "detailnya",
+        "lihat detail",
+        "lihat datanya",
+        "mau lihat",
+        "info lengkap",
+        "lebih lengkap",
+        "lengkapnya",
+        "tampilkan detail",
+        "show detail",
+        "show details",
+        "more detail",
+        "more details",
+        "data lengkap",
+    )
+    return any(term in message for term in followup_terms)
+
+
+def _asks_for_contextual_period_followup(message: str) -> bool:
+    period_terms = (
+        "hari ini",
+        "today",
+        "kemarin",
+        "yesterday",
+        "bulan lalu",
+        "last month",
+        "bulan ini",
+        "this month",
+    )
+    if any(term in message for term in period_terms):
+        return True
+    return _specific_date_from_message(message, _now_jakarta().year) is not None
+
+
 def _asks_for_contextual_lead_child_identity(message: str) -> bool:
     followup_terms = (
         "siapa",
@@ -740,6 +1002,14 @@ def _history_has_tool_call(payload: ChatRequest, tool_name: str) -> bool:
         if any(tool.name == tool_name and tool.status == "ok" for tool in turn.tool_calls):
             return True
     return False
+
+
+def _last_ok_tool_call(payload: ChatRequest) -> Optional[str]:
+    for turn in reversed(payload.history[-10:]):
+        for tool in reversed(turn.tool_calls):
+            if tool.status == "ok":
+                return tool.name
+    return None
 
 
 def _clean_text(value: Any) -> str:

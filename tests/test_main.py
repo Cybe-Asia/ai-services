@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 
 import httpx
 import pytest
@@ -290,6 +291,59 @@ def test_admin_chat_streams_tool_events_and_persists_thread(monkeypatch) -> None
     assert loaded.json()["thread"]["messageCount"] == 2
 
 
+def test_admin_chat_streams_contextual_detail_followup(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if params == {"limit": "1", "offset": "0"}:
+            return {"data": {"total": 1}}
+        if params == {"limit": "5", "offset": "0"}:
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        raise AssertionError(f"unexpected params: {params}")
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    first = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={"message": "ada berapa eoi sekarang?", "actorRole": "admin"},
+    )
+    assert first.status_code == 200
+    conversation_id = first.json()["conversationId"]
+
+    response = client.post(
+        "/api/ai/v1/chat/stream",
+        headers={"authorization": "Bearer test-token"},
+        json={
+            "message": "mau lihat detailnya",
+            "actorRole": "admin",
+            "conversationId": conversation_id,
+        },
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    assert ("tool_call", {"name": "admission.admin_leads_list", "status": "ok"}) in events
+    streamed_text = "".join(data["text"] for event, data in events if event == "delta")
+    assert "Arief Nugraha" in streamed_text
+    assert events[-1][1]["toolCalls"] == [
+        {"name": "admission.admin_leads_list", "status": "ok"}
+    ]
+
+
 def test_public_chat_streams_llm_deltas(monkeypatch) -> None:
     class FakeLlmClient:
         def __init__(self, settings):
@@ -467,6 +521,181 @@ def test_owner_contextual_lead_identity_followup_uses_leads_list_tool(monkeypatc
     assert "arief@example.test" in result.answer
     assert result.tool_calls[0].name == "admission.admin_leads_list"
     assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_contextual_detail_followup_uses_leads_list_tool(monkeypatch) -> None:
+    class ExplodingLlmClient:
+        def __init__(self, settings):
+            pass
+
+        async def complete(self, *args, **kwargs):
+            raise AssertionError("detail follow-up should use deterministic admission tool")
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "5", "offset": "0"}
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "leadStatus": "verified",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "LlmClient", ExplodingLlmClient)
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="mau lihat detailnya",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(ai_provider_base_url="http://localhost:11434/v1"),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_list"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_yesterday_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-16T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-17T16:59:59.999000+00:00"
+        return {"data": {"total": 2}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="kalau kemarin ada berapa eoi?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "2 EOI" in result.answer
+    assert "kemarin (17 Juni 2026)" in result.answer
+
+
+def test_owner_contextual_last_month_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-04-30T17:00:00+00:00"
+        assert params["dateTo"] == "2026-05-31T16:59:59.999000+00:00"
+        return {"data": {"total": 4}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="kalau bulan lalu?",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "4 EOI" in result.answer
+    assert "bulan lalu (Mei 2026)" in result.answer
+
+
+def test_owner_specific_date_leads_list_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-16T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-17T16:59:59.999000+00:00"
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "leadStatus": "verified",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="siapa aja yang daftar 17 Juni 2026?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "1 EOI 17 Juni 2026" in result.answer
+    assert "Arief Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_list"
 
 
 def test_owner_named_lead_child_count_uses_admission_tool(monkeypatch) -> None:
