@@ -168,11 +168,14 @@ async def answer_from_school_tools(
     settings: Settings,
     authorization: Optional[str],
 ) -> Optional[ToolAnswer]:
+    lowered = payload.message.casefold()
+    language = _answer_language(payload, lowered)
+    if _asks_for_current_date(lowered):
+        return _current_date_answer(language)
+
     if payload.actor_role not in {ActorRole.owner, ActorRole.admin}:
         return None
 
-    lowered = payload.message.casefold()
-    language = _answer_language(payload, lowered)
     date_range = _date_range_from_message(lowered)
     intent = _deterministic_tool_intent(lowered)
     if intent.name == INTENT_NONE:

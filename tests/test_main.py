@@ -682,7 +682,7 @@ def test_owner_relative_days_ago_eoi_count_uses_date_filter(monkeypatch) -> None
     assert "19 hari lalu (30 Mei 2026)" in result.answer
 
 
-def test_owner_current_date_uses_deterministic_system_tool(monkeypatch) -> None:
+def test_current_date_uses_deterministic_system_tool(monkeypatch) -> None:
     monkeypatch.setattr(
         service_tools,
         "_now_jakarta",
@@ -693,10 +693,10 @@ def test_owner_current_date_uses_deterministic_system_tool(monkeypatch) -> None:
         service_tools.answer_from_school_tools(
             ChatRequest(
                 message="what day is today?",
-                actor_role=ActorRole.admin,
+                actor_role=ActorRole.public,
             ),
             Settings(),
-            "Bearer test-token",
+            None,
         )
     )
 
