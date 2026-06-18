@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -32,7 +33,13 @@ class LlmClient:
             "model": self._settings.ai_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
+                {
+                    "role": "user",
+                    "content": _apply_model_prompt_controls(
+                        self._settings.ai_model,
+                        user_message,
+                    ),
+                },
             ],
             "temperature": temperature,
             "max_tokens": max_tokens or self._settings.ai_max_tokens,
@@ -55,7 +62,11 @@ class LlmClient:
             return None
         message = choices[0].get("message") or {}
         content = message.get("content")
-        return content if isinstance(content, str) and content.strip() else None
+        if not isinstance(content, str):
+            return None
+
+        cleaned = _strip_thinking_content(content).strip()
+        return cleaned if cleaned else None
 
     async def stream_complete(
         self,
@@ -78,7 +89,13 @@ class LlmClient:
             "model": self._settings.ai_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
+                {
+                    "role": "user",
+                    "content": _apply_model_prompt_controls(
+                        self._settings.ai_model,
+                        user_message,
+                    ),
+                },
             ],
             "temperature": temperature,
             "max_tokens": max_tokens or self._settings.ai_max_tokens,
@@ -96,6 +113,7 @@ class LlmClient:
                 headers=headers,
             ) as response:
                 response.raise_for_status()
+                thinking_filter = _ThinkingContentFilter()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -114,4 +132,83 @@ class LlmClient:
                     delta = choices[0].get("delta") or {}
                     content = delta.get("content")
                     if isinstance(content, str) and content:
-                        yield content
+                        cleaned = thinking_filter.feed(content)
+                        if cleaned:
+                            yield cleaned
+
+                cleaned = thinking_filter.flush()
+                if cleaned:
+                    yield cleaned
+
+
+def _apply_model_prompt_controls(model: str, user_message: str) -> str:
+    if "qwen3" not in model.casefold():
+        return user_message
+    if user_message.lstrip().startswith(("/no_think", "/think")):
+        return user_message
+    return f"/no_think\n{user_message}"
+
+
+def _strip_thinking_content(text: str) -> str:
+    thinking_filter = _ThinkingContentFilter()
+    return f"{thinking_filter.feed(text)}{thinking_filter.flush()}"
+
+
+def _longest_suffix_prefix(text: str, prefix: str) -> int:
+    max_length = min(len(text), len(prefix) - 1)
+    for length in range(max_length, 0, -1):
+        if text[-length:] == prefix[:length]:
+            return length
+    return 0
+
+
+@dataclass
+class _ThinkingContentFilter:
+    buffer: str = ""
+    in_thinking: bool = False
+
+    def feed(self, chunk: str) -> str:
+        self.buffer += chunk
+        output: list[str] = []
+
+        while self.buffer:
+            lowered = self.buffer.casefold()
+            if self.in_thinking:
+                close_index = lowered.find("</think>")
+                if close_index < 0:
+                    keep = _longest_suffix_prefix(lowered, "</think>")
+                    self.buffer = self.buffer[-keep:] if keep else ""
+                    return "".join(output)
+                self.buffer = self.buffer[close_index + len("</think>") :]
+                self.in_thinking = False
+                continue
+
+            open_index = lowered.find("<think")
+            if open_index < 0:
+                keep = _longest_suffix_prefix(lowered, "<think")
+                if keep:
+                    output.append(self.buffer[:-keep])
+                    self.buffer = self.buffer[-keep:]
+                else:
+                    output.append(self.buffer)
+                    self.buffer = ""
+                return "".join(output)
+
+            output.append(self.buffer[:open_index])
+            tag_end = self.buffer.find(">", open_index)
+            if tag_end < 0:
+                self.buffer = self.buffer[open_index:]
+                return "".join(output)
+
+            self.buffer = self.buffer[tag_end + 1 :]
+            self.in_thinking = True
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        if self.in_thinking:
+            self.buffer = ""
+            return ""
+        output = self.buffer
+        self.buffer = ""
+        return output
