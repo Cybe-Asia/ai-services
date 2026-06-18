@@ -37,6 +37,7 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
     return MetadataResponse(
         service=settings.service_name,
         model=settings.ai_model,
+        max_tokens=settings.ai_max_tokens,
         provider_configured=settings.ai_provider_base_url is not None,
         sis_service_url=settings.sis_service_url,
         admission_service_url=settings.admission_service_url,

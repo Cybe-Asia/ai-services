@@ -25,7 +25,7 @@ class LlmClient:
                 {"role": "user", "content": user_message},
             ],
             "temperature": 0.2,
-            "max_tokens": 700,
+            "max_tokens": self._settings.ai_max_tokens,
         }
 
         async with httpx.AsyncClient(timeout=self._settings.request_timeout_seconds) as client:

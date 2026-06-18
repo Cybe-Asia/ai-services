@@ -58,6 +58,7 @@ class HealthResponse(CamelModel):
 class MetadataResponse(CamelModel):
     service: str
     model: str
+    max_tokens: int
     provider_configured: bool
     sis_service_url: str
     admission_service_url: str

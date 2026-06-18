@@ -11,6 +11,12 @@ def test_health() -> None:
     assert response.json()["service"] == "ai-service"
 
 
+def test_metadata_reports_generation_limit() -> None:
+    response = client.get("/api/v1/ai-service/metadata")
+    assert response.status_code == 200
+    assert response.json()["maxTokens"] == 256
+
+
 def test_public_marketing_prompt_is_allowed() -> None:
     response = client.post(
         "/api/ai/v1/chat",

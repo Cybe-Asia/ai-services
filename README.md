@@ -28,6 +28,13 @@ curl -s http://127.0.0.1:8082/api/ai/v1/chat \
   -d '{"message":"buatkan ide marketing ppdb","actorRole":"public","locale":"id"}' | jq
 ```
 
+Useful local/provider settings:
+
+- `AI_PROVIDER_BASE_URL`: OpenAI-compatible provider URL, for example Ollama `/v1`.
+- `AI_MODEL`: provider model name.
+- `AI_MAX_TOKENS`: response cap sent to the provider.
+- `REQUEST_TIMEOUT_SECONDS`: provider request timeout.
+
 ## Boundaries
 
 - `ai-services` may call `sis-services`, `admission-services`, and other owning services through explicit APIs.

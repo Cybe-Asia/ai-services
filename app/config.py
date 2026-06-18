@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     ai_model: str = "llama3.1:8b"
     ai_provider_base_url: Optional[HttpUrl] = None
     ai_provider_api_key: Optional[str] = None
+    ai_max_tokens: int = Field(default=256, ge=1, le=2048)
 
     sis_service_url: str = "http://sis-service"
     admission_service_url: str = "http://admission-service"
