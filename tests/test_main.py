@@ -3,8 +3,9 @@ import asyncio
 import httpx
 from fastapi.testclient import TestClient
 
+from app import main as main_module
 from app import service_tools
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.main import app
 from app.schemas import ActorRole, ChatRequest
 
@@ -81,6 +82,18 @@ def test_public_payment_prompt_is_refused() -> None:
     assert response.json()["status"] == "refused"
 
 
+def test_public_paraphrased_finance_prompt_is_refused() -> None:
+    response = client.post(
+        "/api/ai/v1/chat",
+        json={
+            "message": "berapa transaksi yang masih perlu dicek finance?",
+            "actorRole": "public",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "refused"
+
+
 def test_admin_prompt_requires_bearer_token() -> None:
     response = client.post(
         "/api/ai/v1/chat",
@@ -97,6 +110,33 @@ def test_admin_prompt_with_bearer_returns_pending_tool() -> None:
     )
     assert response.status_code == 200
     body = response.json()
+    assert body["toolCalls"][0]["status"] == "not_configured"
+
+
+def test_admin_sensitive_prompt_without_tool_does_not_call_draft_llm(monkeypatch) -> None:
+    class ExplodingLlmClient:
+        def __init__(self, settings):
+            pass
+
+        async def complete(self, *args, **kwargs):
+            raise AssertionError("sensitive data fallback must not draft with LLM")
+
+    monkeypatch.setattr(main_module, "LlmClient", ExplodingLlmClient)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        ai_provider_base_url="http://localhost:11434/v1"
+    )
+    try:
+        response = client.post(
+            "/api/ai/v1/chat",
+            headers={"authorization": "Bearer test-token"},
+            json={"message": "siapa best student by nilai?", "actorRole": "admin"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "tool data resmi" in body["answer"]
     assert body["toolCalls"][0]["status"] == "not_configured"
 
 
@@ -204,11 +244,19 @@ def test_owner_paraphrased_registration_count_uses_llm_classifier(monkeypatch) -
         def __init__(self, settings):
             assert settings.ai_provider_base_url is not None
 
-        async def complete(self, system_prompt, user_message, temperature=0.2, max_tokens=None):
-            assert "approved backend tools" in system_prompt
+        async def complete(
+            self,
+            system_prompt,
+            user_message,
+            temperature=0.2,
+            max_tokens=None,
+            timeout_seconds=None,
+        ):
+            assert "Classify Digital Schools admin questions" in system_prompt
             assert user_message == "berapa calon keluarga masuk sejauh ini?"
             assert temperature == 0.0
-            assert max_tokens == 96
+            assert max_tokens == 32
+            assert timeout_seconds == 75.0
             return '{"intent":"admission_eoi_count"}'
 
     async def fake_get_json(url, authorization, params):
@@ -316,11 +364,19 @@ def test_owner_paraphrased_payment_count_uses_llm_classifier(monkeypatch) -> Non
         def __init__(self, settings):
             assert settings.ai_provider_base_url is not None
 
-        async def complete(self, system_prompt, user_message, temperature=0.2, max_tokens=None):
+        async def complete(
+            self,
+            system_prompt,
+            user_message,
+            temperature=0.2,
+            max_tokens=None,
+            timeout_seconds=None,
+        ):
             assert "paymentStatus" in system_prompt
             assert user_message == "berapa transaksi yang masih perlu dicek finance?"
             assert temperature == 0.0
-            assert max_tokens == 96
+            assert max_tokens == 32
+            assert timeout_seconds == 75.0
             return '{"intent":"payment_review_count","paymentStatus":"waiting_verification"}'
 
     async def fake_get_json(url, authorization, params):

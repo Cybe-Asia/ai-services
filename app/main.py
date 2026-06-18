@@ -26,6 +26,7 @@ app = FastAPI(
 
 SETTINGS_DEPENDENCY = Depends(get_settings)
 AUTH_HEADER = Header(default=None)
+PRIVILEGED_DATA_ROLES = {ActorRole.owner, ActorRole.admin, ActorRole.teacher}
 
 
 @app.get("/api/v1/ai-service/health", response_model=HealthResponse)
@@ -76,6 +77,17 @@ async def chat(
             answer=tool_response.answer,
             sources=tool_response.sources,
             tool_calls=tool_response.tool_calls,
+        )
+
+    if (
+        payload.actor_role in PRIVILEGED_DATA_ROLES
+        and requires_privileged_role(payload.message)
+    ):
+        return ChatResponse(
+            conversation_id=payload.conversation_id or str(uuid4()),
+            answer=_fallback_answer(payload),
+            sources=_sources_for_message(payload.message),
+            tool_calls=_tool_calls_for_message(payload.message),
         )
 
     answer = await _draft_answer(payload, settings)

@@ -15,6 +15,7 @@ class LlmClient:
         user_message: str,
         temperature: float = 0.2,
         max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> Optional[str]:
         if self._settings.ai_provider_base_url is None:
             return None
@@ -34,7 +35,8 @@ class LlmClient:
             "max_tokens": max_tokens or self._settings.ai_max_tokens,
         }
 
-        async with httpx.AsyncClient(timeout=self._settings.request_timeout_seconds) as client:
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
                 json=payload,
