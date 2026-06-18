@@ -730,6 +730,10 @@ def _date_range_from_message(message: str) -> Optional[DateRange]:
     now = _now_jakarta()
     today = now.date()
 
+    relative_day = _relative_day_range_from_message(message, today)
+    if relative_day is not None:
+        return relative_day
+
     if any(term in message for term in ("hari ini", "today")):
         return _single_day_range(today, "hari ini")
     if any(term in message for term in ("kemarin", "yesterday")):
@@ -758,6 +762,22 @@ def _date_range_from_message(message: str) -> Optional[DateRange]:
         return _single_day_range(specific, _format_day_label(specific))
 
     return None
+
+
+def _relative_day_range_from_message(message: str, today) -> Optional[DateRange]:
+    match = re.search(
+        r"\b(?P<count>\d{1,4})\s*(?:hari|day|days)\s*(?:yang\s+)?(?:lalu|ago)\b",
+        message,
+    )
+    if not match:
+        return None
+
+    days = int(match.group("count"))
+    if days <= 0:
+        return None
+
+    day = today - timedelta(days=days)
+    return _single_day_range(day, f"{days} hari lalu ({_format_day_label(day)})")
 
 
 def _specific_date_from_message(message: str, default_year: int):
@@ -967,6 +987,12 @@ def _asks_for_contextual_lead_detail(message: str) -> bool:
 
 
 def _asks_for_contextual_period_followup(message: str) -> bool:
+    if re.search(
+        r"\b\d{1,4}\s*(?:hari|day|days)\s*(?:yang\s+)?(?:lalu|ago)\b",
+        message,
+    ):
+        return True
+
     period_terms = (
         "hari ini",
         "today",

@@ -610,6 +610,81 @@ def test_owner_yesterday_eoi_count_uses_date_filter(monkeypatch) -> None:
     assert "kemarin (17 Juni 2026)" in result.answer
 
 
+def test_owner_relative_days_ago_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-05-29T17:00:00+00:00"
+        assert params["dateTo"] == "2026-05-30T16:59:59.999000+00:00"
+        return {"data": {"total": 3}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa EOI 19 hari lalu?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "3 EOI" in result.answer
+    assert "19 hari lalu (30 Mei 2026)" in result.answer
+
+
+def test_owner_contextual_relative_days_ago_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-05-29T17:00:00+00:00"
+        assert params["dateTo"] == "2026-05-30T16:59:59.999000+00:00"
+        return {"data": {"total": 3}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="kalau 19 hari lalu?",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "3 EOI" in result.answer
+    assert "19 hari lalu (30 Mei 2026)" in result.answer
+
+
 def test_owner_contextual_last_month_eoi_count_uses_date_filter(monkeypatch) -> None:
     monkeypatch.setattr(
         service_tools,
