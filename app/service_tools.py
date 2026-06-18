@@ -24,6 +24,7 @@ INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 INTENT_PAYMENT_APPLICATION_FEE = "payment_application_fee_quote"
 INTENT_ADMISSIONS_PAYMENTS_REPORT = "admissions_payments_report"
+INTENT_CURRENT_DATE = "current_date"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 DEFAULT_SCHOOL_CODES = ("IIHS", "IISS", "IIBS")
 REPORT_EXPORT_FORMATS = {"xlsx", "pdf", "docx", "md"}
@@ -56,6 +57,24 @@ ID_MONTH_NAMES = {
     10: "Oktober",
     11: "November",
     12: "Desember",
+}
+ID_WEEKDAY_NAMES = {
+    0: "Senin",
+    1: "Selasa",
+    2: "Rabu",
+    3: "Kamis",
+    4: "Jumat",
+    5: "Sabtu",
+    6: "Minggu",
+}
+EN_WEEKDAY_NAMES = {
+    0: "Monday",
+    1: "Tuesday",
+    2: "Wednesday",
+    3: "Thursday",
+    4: "Friday",
+    5: "Saturday",
+    6: "Sunday",
 }
 MONTH_ALIASES = {
     "jan": 1,
@@ -195,15 +214,20 @@ async def answer_from_school_tools(
             settings,
             authorization,
             lowered,
+            date_range,
             intent.payment_status,
             language,
         )
     if intent.name == INTENT_PAYMENT_APPLICATION_FEE:
         return await _payment_application_fee_quote(settings, authorization, lowered, language)
+    if intent.name == INTENT_CURRENT_DATE:
+        return _current_date_answer(language)
     return None
 
 
 def _deterministic_tool_intent(message: str) -> ToolIntent:
+    if _asks_for_current_date(message):
+        return ToolIntent(INTENT_CURRENT_DATE)
     if _asks_for_admissions_payments_report(message):
         return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
     if _asks_for_lead_child_count(message):
@@ -232,6 +256,11 @@ def _contextual_tool_intent(
             return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
         if last_tool == "admission.admin_leads_count":
             return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
+        if last_tool == "payment.admin_review_count":
+            return ToolIntent(
+                INTENT_PAYMENT_REVIEW_COUNT,
+                _payment_status_from_message(lowered_message),
+            )
 
     if _asks_for_contextual_lead_child_identity(lowered_message) and _history_has_tool_call(
         payload,
@@ -239,7 +268,12 @@ def _contextual_tool_intent(
     ):
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
     if _asks_for_contextual_lead_detail(lowered_message):
-        if _history_has_tool_call(payload, "admission.admin_leads_list"):
+        if (
+            _history_has_tool_call(payload, "admission.admin_leads_list")
+            or _history_has_tool_call(payload, "admission.admin_lead_child_count")
+            or _history_has_tool_call(payload, "admission.admin_lead_students_list")
+            or _history_has_tool_call(payload, "admission.admin_lead_detail")
+        ):
             return ToolIntent(INTENT_ADMISSION_LEAD_DETAIL)
         if _history_has_tool_call(payload, "admission.admin_leads_count"):
             return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
@@ -332,6 +366,8 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
         return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
     if intent == INTENT_ADMISSIONS_PAYMENTS_REPORT:
         return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
+    if intent == INTENT_CURRENT_DATE:
+        return ToolIntent(INTENT_CURRENT_DATE)
     return ToolIntent(INTENT_NONE)
 
 
@@ -376,6 +412,10 @@ def _normalize_intent(value: Any) -> str:
         "admissions_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
         "eoi_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
         "report_admissions_payments": INTENT_ADMISSIONS_PAYMENTS_REPORT,
+        INTENT_CURRENT_DATE: INTENT_CURRENT_DATE,
+        "today": INTENT_CURRENT_DATE,
+        "current_day": INTENT_CURRENT_DATE,
+        "current_date": INTENT_CURRENT_DATE,
         INTENT_NONE: INTENT_NONE,
     }
     return aliases.get(normalized, INTENT_NONE)
@@ -740,16 +780,36 @@ async def _admission_lead_students_list(
             name = _clean_text(student.get("fullName")) or (
                 "Name unavailable" if language == "en" else "Nama belum tersedia"
             )
+            date_of_birth = _clean_text(student.get("dateOfBirth"))
+            age = _string_value(student.get("ageAtApplication"))
+            current_school = _clean_text(student.get("currentSchool"))
             target_grade = _clean_text(student.get("targetGradeLevel"))
             target_school = _clean_text(student.get("targetSchool"))
+            application_mode = _clean_text(student.get("applicationMode"))
             student_status = _clean_text(student.get("applicantStatus"))
             details = []
+            if date_of_birth:
+                details.append(
+                    f"DOB: {date_of_birth}"
+                    if language == "en"
+                    else f"tanggal lahir: {date_of_birth}"
+                )
+            if age:
+                details.append(f"age: {age}" if language == "en" else f"usia: {age}")
+            if current_school:
+                details.append(
+                    f"current school: {current_school}"
+                    if language == "en"
+                    else f"sekolah asal: {current_school}"
+                )
             if target_grade:
                 details.append(f"grade: {target_grade}")
             if target_school:
                 details.append(
                     f"school: {target_school}" if language == "en" else f"sekolah: {target_school}"
                 )
+            if application_mode:
+                details.append(f"mode: {application_mode}")
             if student_status:
                 details.append(f"status: {student_status}")
             suffix = f" ({'; '.join(details)})" if details else ""
@@ -769,6 +829,7 @@ async def _payment_review_count(
     settings: Settings,
     authorization: Optional[str],
     lowered_message: str,
+    date_range: Optional[DateRange] = None,
     status_override: Optional[str] = None,
     language: str = "id",
 ) -> ToolAnswer:
@@ -782,7 +843,12 @@ async def _payment_review_count(
         body = await _get_json(
             url,
             authorization,
-            {"status": status, "limit": "1", "offset": "0"},
+            _payment_review_params(
+                status=status,
+                limit=1,
+                offset=0,
+                date_range=date_range,
+            ),
         )
         total = _extract_total(body)
     except httpx.HTTPStatusError as exc:
@@ -800,10 +866,11 @@ async def _payment_review_count(
         )
 
     label = _payment_status_label(status, language)
+    scope = _date_scope(date_range, language)
     answer = (
-        f"There are {total} payments {label} in payment-service."
+        f"There are {total} payments {label}{scope} in payment-service."
         if language == "en"
-        else f"Ada {total} pembayaran {label} di payment-service."
+        else f"Ada {total} pembayaran {label}{scope} di payment-service."
     )
     return ToolAnswer(
         answer=answer,
@@ -861,6 +928,22 @@ async def _payment_application_fee_quote(
         answer=answer,
         sources=[SourceRef(kind="service", title="payment-service fee structures", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+def _current_date_answer(language: str = "id") -> ToolAnswer:
+    now = _now_jakarta()
+    day = now.date()
+    if language == "en":
+        weekday = EN_WEEKDAY_NAMES[day.weekday()]
+        answer = f"Today is {weekday}, {_format_day_label_en(day)}."
+    else:
+        weekday = ID_WEEKDAY_NAMES[day.weekday()]
+        answer = f"Hari ini {weekday}, {_format_day_label(day)}."
+    return ToolAnswer(
+        answer=answer,
+        sources=[],
+        tool_calls=[ToolCallRef(name="system.current_date", status="ok")],
     )
 
 
@@ -1039,6 +1122,7 @@ async def _fetch_report_payment_rows(
             offset=offset,
             school=request.school,
             search=request.search,
+            date_range=request.date_range,
         )
         body = await _get_json(url, authorization, params)
         page_rows, total = _extract_payment_review_rows(body)
@@ -1211,6 +1295,7 @@ def _payment_review_params(
     offset: int,
     school: str = "",
     search: str = "",
+    date_range: Optional[DateRange] = None,
 ) -> dict[str, str]:
     params = {
         "status": status or "",
@@ -1221,6 +1306,9 @@ def _payment_review_params(
         params["school"] = school
     if search:
         params["search"] = search
+    if date_range is not None:
+        params["dateFrom"] = date_range.start.astimezone(timezone.utc).isoformat()
+        params["dateTo"] = date_range.end.astimezone(timezone.utc).isoformat()
     return params
 
 
@@ -1308,6 +1396,10 @@ def _lead_report_rows(rows: list[dict[str, Any]]) -> list[list[str]]:
 
 def _payment_report_headers() -> list[str]:
     return [
+        "activity_at",
+        "created_at",
+        "paid_at",
+        "reviewed_at",
         "payment_id",
         "lead_id",
         "parent_name",
@@ -1322,6 +1414,7 @@ def _payment_report_headers() -> list[str]:
         "short_amount",
         "latest_proof_amount",
         "latest_proof_uploaded_at",
+        "latest_proof_paid_at",
         "age_days",
     ]
 
@@ -1329,6 +1422,10 @@ def _payment_report_headers() -> list[str]:
 def _payment_report_rows(rows: list[dict[str, Any]]) -> list[list[str]]:
     return [
         [
+            _clean_text(row.get("activityAt")),
+            _clean_text(row.get("createdAt")),
+            _clean_text(row.get("paidAt")),
+            _clean_text(row.get("reviewedAt")),
             _clean_text(row.get("paymentId")),
             _clean_text(row.get("leadId")),
             _clean_text(row.get("parentName")),
@@ -1343,6 +1440,7 @@ def _payment_report_rows(rows: list[dict[str, Any]]) -> list[list[str]]:
             _string_value(row.get("shortAmount")),
             _string_value(row.get("latestProofAmount")),
             _clean_text(row.get("latestProofUploadedAt")),
+            _clean_text(row.get("latestProofPaidAt")),
             _string_value(row.get("ageDays")),
         ]
         for row in rows
@@ -2108,6 +2206,36 @@ def _format_day_label_en(day) -> str:
     return f"{month_names[day.month]} {day.day}, {day.year}"
 
 
+def _asks_for_current_date(message: str) -> bool:
+    direct_phrases = (
+        "what day is today",
+        "what date is today",
+        "what is the date today",
+        "today's date",
+        "todays date",
+        "hari apa hari ini",
+        "tanggal berapa hari ini",
+        "hari ini hari apa",
+        "hari ini tanggal berapa",
+        "sekarang tanggal berapa",
+    )
+    if any(phrase in message for phrase in direct_phrases):
+        return True
+    has_today = "today" in message or "hari ini" in message
+    asks_day_or_date = any(term in message for term in ("day", "date", "hari", "tanggal"))
+    operational_terms = (
+        "eoi",
+        "lead",
+        "payment",
+        "pembayaran",
+        "pendaftar",
+        "registrasi",
+        "admission",
+        "admissions",
+    )
+    return has_today and asks_day_or_date and not any(term in message for term in operational_terms)
+
+
 def _normalize_year(value: Optional[str], default_year: int) -> int:
     if not value:
         return default_year
@@ -2393,6 +2521,13 @@ def _lead_search_query_from_message(message: str) -> str:
 
 
 def _lead_search_query_from_assistant(message: str) -> str:
+    detail_match = re.search(
+        r"^(?:Detail EOI lengkap untuk|Full EOI detail for)\s+([^:\n]+):",
+        message,
+        flags=re.MULTILINE,
+    )
+    if detail_match:
+        return _clean_search_query(detail_match.group(1))
     match = re.search(r"^\s*\d+\.\s+([^(\n]+)", message, flags=re.MULTILINE)
     if match:
         return _clean_search_query(match.group(1))
@@ -2556,6 +2691,8 @@ def _answer_language(payload: ChatRequest, lowered_message: str) -> str:
         "how much",
         "what is",
         "what are",
+        "what day",
+        "what date",
         "who is",
         "who are",
         "which",
@@ -2570,6 +2707,10 @@ def _answer_language(payload: ChatRequest, lowered_message: str) -> str:
         "registered",
         "pending verification",
         "application fee",
+        "translate",
+        "english",
+        "in english",
+        "today",
         "children",
         "student",
         "students",

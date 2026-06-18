@@ -682,6 +682,31 @@ def test_owner_relative_days_ago_eoi_count_uses_date_filter(monkeypatch) -> None
     assert "19 hari lalu (30 Mei 2026)" in result.answer
 
 
+def test_owner_current_date_uses_deterministic_system_tool(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="what day is today?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert result.answer == "Today is Thursday, June 18, 2026."
+    assert [(tool.name, tool.status) for tool in result.tool_calls] == [
+        ("system.current_date", "ok")
+    ]
+
+
 def test_owner_contextual_relative_days_ago_eoi_count_uses_date_filter(monkeypatch) -> None:
     monkeypatch.setattr(
         service_tools,
@@ -880,12 +905,18 @@ def test_owner_contextual_child_identity_followup_uses_detail_tool(monkeypatch) 
                 "students": [
                     {
                         "fullName": "Aisha Nugraha",
+                        "dateOfBirth": "2019-05-19",
+                        "ageAtApplication": 7,
+                        "currentSchool": "TK A",
                         "targetGradeLevel": "Grade 7",
                         "targetSchool": "SCH-IISS",
+                        "applicationMode": "new",
                         "applicantStatus": "submitted",
                     },
                     {
                         "fullName": "Bilal Nugraha",
+                        "dateOfBirth": "2018-04-20",
+                        "ageAtApplication": 8,
                         "targetGradeLevel": "Grade 8",
                         "targetSchool": "SCH-IISS",
                         "applicantStatus": "submitted",
@@ -918,6 +949,9 @@ def test_owner_contextual_child_identity_followup_uses_detail_tool(monkeypatch) 
     assert result is not None
     assert "Aisha Nugraha" in result.answer
     assert "Bilal Nugraha" in result.answer
+    assert "tanggal lahir: 2019-05-19" in result.answer
+    assert "usia: 7" in result.answer
+    assert "sekolah asal: TK A" in result.answer
     assert result.tool_calls[0].name == "admission.admin_lead_students_list"
     assert result.tool_calls[0].status == "ok"
 
@@ -1132,6 +1166,42 @@ def test_owner_arrived_payment_prompt_uses_payment_tool(monkeypatch) -> None:
 
     assert result is not None
     assert "5 pembayaran" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_review_count"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_payment_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params["status"] == "pending_verification"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-17T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        return {"data": {"total": 6}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa pembayaran pending hari ini?",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "6 pembayaran" in result.answer
+    assert "hari ini" in result.answer
     assert result.tool_calls[0].name == "payment.admin_review_count"
     assert result.tool_calls[0].status == "ok"
 
