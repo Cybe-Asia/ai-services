@@ -6,7 +6,7 @@ from app.llm_client import (
 
 
 def test_qwen3_prompt_uses_no_think_control() -> None:
-    assert _apply_model_prompt_controls("qwen3:14b", "berapa EOI?") == "/no_think\nberapa EOI?"
+    assert _apply_model_prompt_controls("qwen3:14b", "berapa EOI?") == "berapa EOI? /no_think"
     assert _apply_model_prompt_controls("llama3.2:1b", "berapa EOI?") == "berapa EOI?"
     assert _apply_model_prompt_controls("qwen3:14b", "/think\nanalisa") == "/think\nanalisa"
 

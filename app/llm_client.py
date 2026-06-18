@@ -44,6 +44,8 @@ class LlmClient:
             "temperature": temperature,
             "max_tokens": max_tokens or self._settings.ai_max_tokens,
         }
+        if _is_qwen3_model(self._settings.ai_model):
+            payload["think"] = False
         if response_format is not None:
             payload["response_format"] = response_format
 
@@ -101,6 +103,8 @@ class LlmClient:
             "max_tokens": max_tokens or self._settings.ai_max_tokens,
             "stream": True,
         }
+        if _is_qwen3_model(self._settings.ai_model):
+            payload["think"] = False
         if response_format is not None:
             payload["response_format"] = response_format
 
@@ -142,11 +146,15 @@ class LlmClient:
 
 
 def _apply_model_prompt_controls(model: str, user_message: str) -> str:
-    if "qwen3" not in model.casefold():
+    if not _is_qwen3_model(model):
         return user_message
-    if user_message.lstrip().startswith(("/no_think", "/think")):
+    if "/no_think" in user_message or "/think" in user_message:
         return user_message
-    return f"/no_think\n{user_message}"
+    return f"{user_message.rstrip()} /no_think"
+
+
+def _is_qwen3_model(model: str) -> bool:
+    return "qwen3" in model.casefold()
 
 
 def _strip_thinking_content(text: str) -> str:
