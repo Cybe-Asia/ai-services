@@ -2,7 +2,11 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from typing import Any, Optional
+from urllib.parse import urlencode
+from xml.sax.saxutils import escape as xml_escape
+from zipfile import ZIP_DEFLATED, ZipFile
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -19,8 +23,25 @@ INTENT_ADMISSION_LEAD_CHILD_COUNT = "admission_lead_child_count"
 INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 INTENT_PAYMENT_APPLICATION_FEE = "payment_application_fee_quote"
+INTENT_ADMISSIONS_PAYMENTS_REPORT = "admissions_payments_report"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 DEFAULT_SCHOOL_CODES = ("IIHS", "IISS", "IIBS")
+REPORT_EXPORT_FORMATS = {"xlsx", "pdf", "docx", "md"}
+REPORT_EXPORT_LIMIT = 500
+REPORT_PREVIEW_LIMIT = 5
+OPENXML_CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+OPENXML_PACKAGE_RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+OPENXML_OFFICE_RELS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+OPENXML_RELS_CONTENT_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
+XLSX_WORKBOOK_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+)
+XLSX_WORKSHEET_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+)
+DOCX_DOCUMENT_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+)
 SCHOOL_TIME_ZONE = ZoneInfo("Asia/Jakarta")
 ID_MONTH_NAMES = {
     1: "Januari",
@@ -96,6 +117,33 @@ class DateRange:
     label: str
 
 
+@dataclass(frozen=True)
+class ReportRequest:
+    date_range: Optional[DateRange]
+    language: str = "id"
+    payment_status: Optional[str] = None
+    school: str = ""
+    search: str = ""
+    limit: int = REPORT_EXPORT_LIMIT
+
+
+@dataclass(frozen=True)
+class AdmissionsPaymentsReport:
+    request: ReportRequest
+    lead_rows: list[dict[str, Any]]
+    lead_total: int
+    payment_rows: list[dict[str, Any]]
+    payment_total: int
+    generated_at: datetime
+
+
+@dataclass(frozen=True)
+class ReportFile:
+    filename: str
+    media_type: str
+    body: bytes
+
+
 async def answer_from_school_tools(
     payload: ChatRequest,
     settings: Settings,
@@ -113,6 +161,13 @@ async def answer_from_school_tools(
     if intent.name == INTENT_NONE:
         intent = await _classify_tool_intent(payload.message, settings)
 
+    if intent.name == INTENT_ADMISSIONS_PAYMENTS_REPORT:
+        return await _admissions_payments_report_answer(
+            settings,
+            authorization,
+            lowered,
+            language,
+        )
     if intent.name == INTENT_ADMISSION_EOI_COUNT:
         return await _admission_eoi_count(settings, authorization, date_range, language)
     if intent.name == INTENT_ADMISSION_LEADS_LIST:
@@ -149,6 +204,8 @@ async def answer_from_school_tools(
 
 
 def _deterministic_tool_intent(message: str) -> ToolIntent:
+    if _asks_for_admissions_payments_report(message):
+        return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
     if _asks_for_lead_child_count(message):
         return ToolIntent(INTENT_ADMISSION_LEAD_CHILD_COUNT)
     if _asks_for_lead_child_identity(message):
@@ -209,6 +266,8 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "use admission_lead_students_list. "
         "If user asks count of transactions, finance checks, payments, invoices, or manual "
         "transfers, use payment_review_count. "
+        "If user asks to report/export/download/show EOI together with payment data, "
+        "use admissions_payments_report. "
         "If user asks admission/application price, biaya pendaftaran, fee, tariff, or cost, "
         "use payment_application_fee_quote. Otherwise use none. "
         'Example: "berapa calon keluarga masuk?" => {"intent":"admission_eoi_count"}. '
@@ -216,6 +275,8 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         '{"intent":"admission_lead_child_count"}. '
         'Example: "berapa transaksi yang masih perlu dicek finance?" => '
         '{"intent":"payment_review_count","paymentStatus":"pending_verification"}. '
+        'Example: "export EOI and payment this month" => '
+        '{"intent":"admissions_payments_report"}. '
         'Example: "berapa harga admissions?" => {"intent":"payment_application_fee_quote"}.'
     )
 
@@ -269,6 +330,8 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
         return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, payment_status)
     if intent == INTENT_PAYMENT_APPLICATION_FEE:
         return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
+    if intent == INTENT_ADMISSIONS_PAYMENTS_REPORT:
+        return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
     return ToolIntent(INTENT_NONE)
 
 
@@ -308,6 +371,11 @@ def _normalize_intent(value: Any) -> str:
         "application_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
         "admission_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
         "admission_price_quote": INTENT_PAYMENT_APPLICATION_FEE,
+        INTENT_ADMISSIONS_PAYMENTS_REPORT: INTENT_ADMISSIONS_PAYMENTS_REPORT,
+        "admission_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
+        "admissions_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
+        "eoi_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
+        "report_admissions_payments": INTENT_ADMISSIONS_PAYMENTS_REPORT,
         INTENT_NONE: INTENT_NONE,
     }
     return aliases.get(normalized, INTENT_NONE)
@@ -796,6 +864,799 @@ async def _payment_application_fee_quote(
     )
 
 
+async def _admissions_payments_report_answer(
+    settings: Settings,
+    authorization: Optional[str],
+    lowered_message: str,
+    language: str,
+) -> ToolAnswer:
+    tool_name = "report.admissions_payments"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "laporan EOI dan pembayaran")
+
+    request = _report_request_from_message(lowered_message, language, REPORT_PREVIEW_LIMIT)
+    try:
+        report = await build_admissions_payments_report(settings, authorization, request)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa membuat laporan dari admission/payment service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa membuat laporan dari admission/payment service.",
+        )
+
+    answer = _format_report_preview_answer(report)
+    sources = _report_export_sources(
+        request=ReportRequest(
+            date_range=request.date_range,
+            language=language,
+            payment_status=request.payment_status,
+            school=request.school,
+            search=request.search,
+            limit=REPORT_EXPORT_LIMIT,
+        )
+    )
+    return ToolAnswer(
+        answer=answer,
+        sources=sources,
+        tool_calls=[
+            ToolCallRef(name=tool_name, status="ok"),
+            ToolCallRef(name="admission.admin_leads_list", status="ok"),
+            ToolCallRef(name="payment.admin_reviews_list", status="ok"),
+        ],
+    )
+
+
+async def build_admissions_payments_report(
+    settings: Settings,
+    authorization: Optional[str],
+    request: ReportRequest,
+) -> AdmissionsPaymentsReport:
+    lead_rows, lead_total = await _fetch_report_lead_rows(settings, authorization, request)
+    payment_rows, payment_total = await _fetch_report_payment_rows(settings, authorization, request)
+    return AdmissionsPaymentsReport(
+        request=request,
+        lead_rows=lead_rows,
+        lead_total=lead_total,
+        payment_rows=payment_rows,
+        payment_total=payment_total,
+        generated_at=_now_jakarta(),
+    )
+
+
+def report_request_from_export_query(
+    *,
+    date_from: Optional[str],
+    date_to: Optional[str],
+    payment_status: Optional[str],
+    school: Optional[str],
+    search: Optional[str],
+    limit: int,
+    language: str,
+) -> ReportRequest:
+    date_range = _date_range_from_query(date_from, date_to)
+    normalized_payment_status = (
+        _normalize_payment_status(payment_status) if payment_status else None
+    )
+    clean_school = _clean_text(school).upper()
+    if clean_school and clean_school not in DEFAULT_SCHOOL_CODES:
+        clean_school = ""
+    return ReportRequest(
+        date_range=date_range,
+        language="en" if language.casefold().startswith("en") else "id",
+        payment_status=normalized_payment_status,
+        school=clean_school,
+        search=_clean_text(search),
+        limit=max(1, min(limit, REPORT_EXPORT_LIMIT)),
+    )
+
+
+def render_admissions_payments_report(
+    report: AdmissionsPaymentsReport,
+    export_format: str,
+) -> ReportFile:
+    normalized = export_format.casefold().strip().lstrip(".")
+    if normalized not in REPORT_EXPORT_FORMATS:
+        raise ValueError("unsupported report export format")
+
+    filename_base = _report_filename_base(report)
+    if normalized == "xlsx":
+        return ReportFile(
+            filename=f"{filename_base}.xlsx",
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            body=_render_report_xlsx(report),
+        )
+    if normalized == "docx":
+        return ReportFile(
+            filename=f"{filename_base}.docx",
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            body=_render_report_docx(report),
+        )
+    if normalized == "pdf":
+        return ReportFile(
+            filename=f"{filename_base}.pdf",
+            media_type="application/pdf",
+            body=_render_report_pdf(report),
+        )
+    return ReportFile(
+        filename=f"{filename_base}.md",
+        media_type="text/markdown; charset=utf-8",
+        body=_render_report_markdown(report).encode("utf-8"),
+    )
+
+
+async def _fetch_report_lead_rows(
+    settings: Settings,
+    authorization: Optional[str],
+    request: ReportRequest,
+) -> tuple[list[dict[str, Any]], int]:
+    url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
+    rows: list[dict[str, Any]] = []
+    total = 0
+    offset = 0
+    while len(rows) < request.limit:
+        page_limit = min(200, request.limit - len(rows))
+        params = _lead_list_params(
+            limit=page_limit,
+            offset=offset,
+            date_range=request.date_range,
+            school=request.school,
+            search=request.search,
+        )
+        body = await _get_json(url, authorization, params)
+        page_rows, total = _extract_lead_rows(body)
+        rows.extend(page_rows)
+        if not page_rows or len(rows) >= total:
+            break
+        offset += len(page_rows)
+    return rows[: request.limit], total
+
+
+async def _fetch_report_payment_rows(
+    settings: Settings,
+    authorization: Optional[str],
+    request: ReportRequest,
+) -> tuple[list[dict[str, Any]], int]:
+    url = _join_url(settings.payment_service_url, "/api/v1/payments/admin/reviews")
+    rows: list[dict[str, Any]] = []
+    total = 0
+    offset = 0
+    while len(rows) < min(request.limit, REPORT_EXPORT_LIMIT):
+        page_limit = min(200, request.limit - len(rows))
+        params = _payment_review_params(
+            status=request.payment_status,
+            limit=page_limit,
+            offset=offset,
+            school=request.school,
+            search=request.search,
+        )
+        body = await _get_json(url, authorization, params)
+        page_rows, total = _extract_payment_review_rows(body)
+        rows.extend(page_rows)
+        if not page_rows or len(rows) >= total:
+            break
+        offset += len(page_rows)
+    return rows[: request.limit], total
+
+
+def _format_report_preview_answer(report: AdmissionsPaymentsReport) -> str:
+    request = report.request
+    language = request.language
+    period = _report_period_label(request)
+    lead_shown = min(len(report.lead_rows), REPORT_PREVIEW_LIMIT)
+    payment_shown = min(len(report.payment_rows), REPORT_PREVIEW_LIMIT)
+    if language == "en":
+        lines = [
+            "Admissions + payment report is ready.",
+            f"Period: {period}.",
+            f"EOI rows: {report.lead_total} total; previewing {lead_shown}.",
+            f"Payment review rows: {report.payment_total} total; previewing {payment_shown}.",
+            "Export links are available as Excel, PDF, Word, and Markdown.",
+        ]
+    else:
+        lines = [
+            "Laporan EOI + pembayaran sudah siap.",
+            f"Periode: {period}.",
+            f"Data EOI: {report.lead_total} total; preview {lead_shown}.",
+            f"Data review pembayaran: {report.payment_total} total; preview {payment_shown}.",
+            "Link export tersedia sebagai Excel, PDF, Word, dan Markdown.",
+        ]
+
+    if report.lead_rows:
+        lines.append("")
+        lines.extend(_preview_lead_lines(report.lead_rows, language))
+    if report.payment_rows:
+        lines.append("")
+        lines.extend(_preview_payment_lines(report.payment_rows, language))
+    if report.lead_total > report.request.limit or report.payment_total > report.request.limit:
+        lines.append("")
+        lines.append(
+            f"Note: exports are capped at {REPORT_EXPORT_LIMIT} rows per table."
+            if language == "en"
+            else f"Catatan: export dibatasi {REPORT_EXPORT_LIMIT} baris per tabel."
+        )
+    return "\n".join(lines)
+
+
+def _preview_lead_lines(rows: list[dict[str, Any]], language: str) -> list[str]:
+    title = "Latest EOIs:" if language == "en" else "EOI terbaru:"
+    lines = [title]
+    for index, row in enumerate(rows[:REPORT_PREVIEW_LIMIT], start=1):
+        name = _clean_text(row.get("parentName")) or (
+            "Name unavailable" if language == "en" else "Nama belum tersedia"
+        )
+        school = _clean_text(row.get("school"))
+        payment_status = _clean_text(row.get("latestPaymentStatus")) or "-"
+        lines.append(f"{index}. {name} ({school or '-'}; payment: {payment_status})")
+    return lines
+
+
+def _preview_payment_lines(rows: list[dict[str, Any]], language: str) -> list[str]:
+    title = "Payment review queue:" if language == "en" else "Antrian review pembayaran:"
+    lines = [title]
+    for index, row in enumerate(rows[:REPORT_PREVIEW_LIMIT], start=1):
+        name = _clean_text(row.get("parentName")) or (
+            "Name unavailable" if language == "en" else "Nama belum tersedia"
+        )
+        amount = _format_money(row.get("amount"), row.get("currency"))
+        status = _clean_text(row.get("status")) or "-"
+        lines.append(f"{index}. {name} ({status}; {amount})")
+    return lines
+
+
+def _report_export_sources(request: ReportRequest) -> list[SourceRef]:
+    labels = {
+        "xlsx": "Download Excel",
+        "pdf": "Download PDF",
+        "docx": "Download Word",
+        "md": "Download Markdown",
+    }
+    return [
+        SourceRef(
+            kind="file",
+            title=labels[export_format],
+            reference=(
+                "/api/admin/ai/reports/admissions-payments?"
+                f"{_report_query(request, export_format)}"
+            ),
+        )
+        for export_format in ("xlsx", "pdf", "docx", "md")
+    ]
+
+
+def _report_query(request: ReportRequest, export_format: str) -> str:
+    params: dict[str, str] = {
+        "format": export_format,
+        "limit": str(request.limit),
+        "locale": request.language,
+    }
+    if request.date_range is not None:
+        params["dateFrom"] = request.date_range.start.astimezone(timezone.utc).isoformat()
+        params["dateTo"] = request.date_range.end.astimezone(timezone.utc).isoformat()
+    if request.payment_status:
+        params["paymentStatus"] = request.payment_status
+    if request.school:
+        params["school"] = request.school
+    if request.search:
+        params["search"] = request.search
+    return urlencode(params)
+
+
+def _report_request_from_message(
+    lowered_message: str,
+    language: str,
+    limit: int,
+) -> ReportRequest:
+    date_range = None if _asks_for_all_time(lowered_message) else _date_range_from_message(
+        lowered_message
+    )
+    schools = [code for code in DEFAULT_SCHOOL_CODES if code.casefold() in lowered_message]
+    payment_status = _explicit_payment_status_from_message(lowered_message)
+    return ReportRequest(
+        date_range=date_range,
+        language=language,
+        payment_status=payment_status,
+        school=schools[0] if len(schools) == 1 else "",
+        search="",
+        limit=limit,
+    )
+
+
+def _date_range_from_query(date_from: Optional[str], date_to: Optional[str]) -> Optional[DateRange]:
+    if not date_from and not date_to:
+        return None
+    if not date_from or not date_to:
+        raise ValueError("dateFrom and dateTo must be provided together")
+    start = _parse_query_datetime(date_from)
+    end = _parse_query_datetime(date_to)
+    if start is None or end is None or end < start:
+        raise ValueError("invalid date range")
+    label = _format_query_date_range_label(start, end)
+    return DateRange(start=start, end=end, label=label)
+
+
+def _parse_query_datetime(value: str) -> Optional[datetime]:
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=SCHOOL_TIME_ZONE)
+    return parsed.astimezone(SCHOOL_TIME_ZONE)
+
+
+def _format_query_date_range_label(start: datetime, end: datetime) -> str:
+    start_date = start.astimezone(SCHOOL_TIME_ZONE).date()
+    end_date = end.astimezone(SCHOOL_TIME_ZONE).date()
+    if start_date == end_date:
+        return _format_day_label(start_date)
+    return f"{_format_day_label(start_date)} - {_format_day_label(end_date)}"
+
+
+def _payment_review_params(
+    *,
+    status: Optional[str],
+    limit: int,
+    offset: int,
+    school: str = "",
+    search: str = "",
+) -> dict[str, str]:
+    params = {
+        "status": status or "",
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    if school:
+        params["school"] = school
+    if search:
+        params["search"] = search
+    return params
+
+
+def _extract_payment_review_rows(body: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("service response missing data")
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("service response missing rows")
+    total = data.get("total")
+    if not isinstance(total, int):
+        raise ValueError("service response missing total")
+    return [row for row in rows if isinstance(row, dict)], total
+
+
+def _report_period_label(request: ReportRequest) -> str:
+    if request.date_range is None:
+        return "all time" if request.language == "en" else "semua waktu"
+    if request.language == "en":
+        return _format_date_range_label_en(request.date_range)
+    return request.date_range.label
+
+
+def _report_filename_base(report: AdmissionsPaymentsReport) -> str:
+    generated = report.generated_at.strftime("%Y%m%d-%H%M")
+    return f"digital-school-admissions-payments-{generated}"
+
+
+def _report_tables(
+    report: AdmissionsPaymentsReport,
+) -> list[tuple[str, list[str], list[list[str]]]]:
+    return [
+        ("EOI + Latest Payment", _lead_report_headers(), _lead_report_rows(report.lead_rows)),
+        (
+            "Payment Review Queue",
+            _payment_report_headers(),
+            _payment_report_rows(report.payment_rows),
+        ),
+    ]
+
+
+def _lead_report_headers() -> list[str]:
+    return [
+        "submitted_at",
+        "lead_id",
+        "parent_name",
+        "email",
+        "whatsapp",
+        "school",
+        "lead_status",
+        "has_application",
+        "application_status",
+        "applicant_count",
+        "latest_payment_status",
+        "latest_payment_type",
+        "reference_code",
+        "reference_owner",
+        "campaign",
+    ]
+
+
+def _lead_report_rows(rows: list[dict[str, Any]]) -> list[list[str]]:
+    return [
+        [
+            _clean_text(row.get("submittedAt")),
+            _clean_text(row.get("leadId")),
+            _clean_text(row.get("parentName")),
+            _clean_text(row.get("email")),
+            _clean_text(row.get("whatsapp")),
+            _clean_text(row.get("school")),
+            _clean_text(row.get("leadStatus")),
+            "yes" if row.get("hasApplication") is True else "no",
+            _clean_text(row.get("applicationStatus")),
+            str(_safe_int(row.get("applicantCount"))),
+            _clean_text(row.get("latestPaymentStatus")),
+            _clean_text(row.get("latestPaymentType")),
+            _clean_text(row.get("referenceCode")),
+            _clean_text(row.get("referenceOwnerName")),
+            _clean_text(row.get("campaignName")),
+        ]
+        for row in rows
+    ]
+
+
+def _payment_report_headers() -> list[str]:
+    return [
+        "payment_id",
+        "lead_id",
+        "parent_name",
+        "parent_email",
+        "school",
+        "payment_type",
+        "status",
+        "amount",
+        "currency",
+        "amount_submitted",
+        "amount_verified",
+        "short_amount",
+        "latest_proof_amount",
+        "latest_proof_uploaded_at",
+        "age_days",
+    ]
+
+
+def _payment_report_rows(rows: list[dict[str, Any]]) -> list[list[str]]:
+    return [
+        [
+            _clean_text(row.get("paymentId")),
+            _clean_text(row.get("leadId")),
+            _clean_text(row.get("parentName")),
+            _clean_text(row.get("parentEmail")),
+            _clean_text(row.get("school")),
+            _clean_text(row.get("paymentType")),
+            _clean_text(row.get("status")),
+            _string_value(row.get("amount")),
+            _clean_text(row.get("currency")),
+            _string_value(row.get("amountSubmitted")),
+            _string_value(row.get("amountVerified")),
+            _string_value(row.get("shortAmount")),
+            _string_value(row.get("latestProofAmount")),
+            _clean_text(row.get("latestProofUploadedAt")),
+            _string_value(row.get("ageDays")),
+        ]
+        for row in rows
+    ]
+
+
+def _render_report_markdown(report: AdmissionsPaymentsReport) -> str:
+    lines = [
+        "# Digital School Admissions + Payment Report",
+        "",
+        f"Generated: {report.generated_at.isoformat()}",
+        f"Period: {_report_period_label(report.request)}",
+        f"EOI total: {report.lead_total}",
+        f"Payment review total: {report.payment_total}",
+        "",
+    ]
+    for title, headers, rows in _report_tables(report):
+        lines.extend([f"## {title}", ""])
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("| " + " | ".join("---" for _ in headers) + " |")
+        if rows:
+            for row in rows:
+                lines.append("| " + " | ".join(_markdown_cell(value) for value in row) + " |")
+        else:
+            lines.append("| " + " | ".join("-" for _ in headers) + " |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_report_xlsx(report: AdmissionsPaymentsReport) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Types xmlns="{OPENXML_CONTENT_TYPES_NS}">'
+                f'<Default Extension="rels" ContentType="{OPENXML_RELS_CONTENT_TYPE}"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/xl/workbook.xml" '
+                f'ContentType="{XLSX_WORKBOOK_CONTENT_TYPE}"/>'
+                '<Override PartName="/xl/worksheets/sheet1.xml" '
+                f'ContentType="{XLSX_WORKSHEET_CONTENT_TYPE}"/>'
+                '<Override PartName="/xl/worksheets/sheet2.xml" '
+                f'ContentType="{XLSX_WORKSHEET_CONTENT_TYPE}"/>'
+                "</Types>"
+            ),
+        )
+        archive.writestr(
+            "_rels/.rels",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Relationships xmlns="{OPENXML_PACKAGE_RELS_NS}">'
+                '<Relationship Id="rId1" '
+                f'Type="{OPENXML_OFFICE_RELS_NS}/officeDocument" '
+                'Target="xl/workbook.xml"/>'
+                "</Relationships>"
+            ),
+        )
+        archive.writestr(
+            "xl/workbook.xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                f'xmlns:r="{OPENXML_OFFICE_RELS_NS}">'
+                "<sheets>"
+                '<sheet name="EOI Latest Payment" sheetId="1" r:id="rId1"/>'
+                '<sheet name="Payment Review" sheetId="2" r:id="rId2"/>'
+                "</sheets></workbook>"
+            ),
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Relationships xmlns="{OPENXML_PACKAGE_RELS_NS}">'
+                '<Relationship Id="rId1" '
+                f'Type="{OPENXML_OFFICE_RELS_NS}/worksheet" '
+                'Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2" '
+                f'Type="{OPENXML_OFFICE_RELS_NS}/worksheet" '
+                'Target="worksheets/sheet2.xml"/>'
+                "</Relationships>"
+            ),
+        )
+        for index, (_title, headers, rows) in enumerate(_report_tables(report), start=1):
+            archive.writestr(
+                f"xl/worksheets/sheet{index}.xml",
+                _xlsx_sheet_xml(headers, rows),
+            )
+    return output.getvalue()
+
+
+def _xlsx_sheet_xml(headers: list[str], rows: list[list[str]]) -> str:
+    all_rows = [headers, *rows]
+    sheet_rows = []
+    for row_index, row in enumerate(all_rows, start=1):
+        cells = []
+        for column_index, value in enumerate(row, start=1):
+            ref = f"{_xlsx_column_name(column_index)}{row_index}"
+            cells.append(
+                f'<c r="{ref}" t="inlineStr"><is><t>{xml_escape(value)}</t></is></c>'
+            )
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(sheet_rows)}</sheetData>'
+        "</worksheet>"
+    )
+
+
+def _xlsx_column_name(index: int) -> str:
+    name = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def _render_report_docx(report: AdmissionsPaymentsReport) -> bytes:
+    body_parts = [
+        _docx_paragraph("Digital School Admissions + Payment Report", style="Title"),
+        _docx_paragraph(f"Generated: {report.generated_at.isoformat()}"),
+        _docx_paragraph(f"Period: {_report_period_label(report.request)}"),
+        _docx_paragraph(f"EOI total: {report.lead_total}"),
+        _docx_paragraph(f"Payment review total: {report.payment_total}"),
+    ]
+    for title, headers, rows in _report_tables(report):
+        body_parts.append(_docx_paragraph(title, style="Heading1"))
+        body_parts.append(_docx_table(headers, rows))
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:body>{"".join(body_parts)}'
+        '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+        '<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>'
+        "</w:sectPr>"
+        "</w:body></w:document>"
+    )
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Types xmlns="{OPENXML_CONTENT_TYPES_NS}">'
+                f'<Default Extension="rels" ContentType="{OPENXML_RELS_CONTENT_TYPE}"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/word/document.xml" '
+                f'ContentType="{DOCX_DOCUMENT_CONTENT_TYPE}"/>'
+                "</Types>"
+            ),
+        )
+        archive.writestr(
+            "_rels/.rels",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Relationships xmlns="{OPENXML_PACKAGE_RELS_NS}">'
+                '<Relationship Id="rId1" '
+                f'Type="{OPENXML_OFFICE_RELS_NS}/officeDocument" '
+                'Target="word/document.xml"/>'
+                "</Relationships>"
+            ),
+        )
+        archive.writestr("word/document.xml", document_xml)
+    return output.getvalue()
+
+
+def _docx_paragraph(text: str, style: Optional[str] = None) -> str:
+    style_xml = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+    return f"<w:p>{style_xml}<w:r><w:t>{xml_escape(text)}</w:t></w:r></w:p>"
+
+
+def _docx_table(headers: list[str], rows: list[list[str]]) -> str:
+    table_rows = [_docx_table_row(headers)]
+    table_rows.extend(_docx_table_row(row) for row in rows[:REPORT_EXPORT_LIMIT])
+    if len(table_rows) == 1:
+        table_rows.append(_docx_table_row(["-" for _ in headers]))
+    return "<w:tbl>" + "".join(table_rows) + "</w:tbl>"
+
+
+def _docx_table_row(values: list[str]) -> str:
+    cells = "".join(
+        f"<w:tc><w:p><w:r><w:t>{xml_escape(value)}</w:t></w:r></w:p></w:tc>"
+        for value in values
+    )
+    return f"<w:tr>{cells}</w:tr>"
+
+
+def _render_report_pdf(report: AdmissionsPaymentsReport) -> bytes:
+    lines = [
+        "Digital School Admissions + Payment Report",
+        f"Generated: {report.generated_at.isoformat()}",
+        f"Period: {_report_period_label(report.request)}",
+        f"EOI total: {report.lead_total}",
+        f"Payment review total: {report.payment_total}",
+        "",
+    ]
+    for title, headers, rows in _report_tables(report):
+        lines.append(title)
+        lines.append(" | ".join(headers))
+        for row in rows[:80]:
+            lines.append(" | ".join(row))
+        if not rows:
+            lines.append("-")
+        lines.append("")
+    return _simple_pdf(lines)
+
+
+def _simple_pdf(lines: list[str]) -> bytes:
+    wrapped = []
+    for line in lines:
+        wrapped.extend(_wrap_text(line, 110) or [""])
+    pages = [wrapped[index : index + 48] for index in range(0, len(wrapped), 48)] or [[]]
+    objects: list[bytes] = [b""]
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    page_numbers = []
+    for page_lines in pages:
+        stream = _pdf_page_stream(page_lines)
+        content_number = len(objects)
+        objects.append(
+            b"<< /Length "
+            + str(len(stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + stream
+            + b"\nendstream"
+        )
+        page_number = len(objects)
+        page_numbers.append(page_number)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] "
+                f"/Resources << /Font << /F1 3 0 R >> >> "
+                f"/Contents {content_number} 0 R >>"
+            ).encode("ascii")
+        )
+    kids = " ".join(f"{number} 0 R" for number in page_numbers)
+    objects[2] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_numbers)} >>".encode(
+        "ascii"
+    )
+    return _pdf_document(objects)
+
+
+def _pdf_page_stream(lines: list[str]) -> bytes:
+    chunks = ["BT", "/F1 8 Tf", "36 558 Td", "10 TL"]
+    for line in lines:
+        chunks.append(f"({_pdf_escape(line)}) Tj")
+        chunks.append("T*")
+    chunks.append("ET")
+    return "\n".join(chunks).encode("latin-1", "replace")
+
+
+def _pdf_document(objects: list[bytes]) -> bytes:
+    output = BytesIO()
+    output.write(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects[1:], start=1):
+        offsets.append(output.tell())
+        output.write(f"{index} 0 obj\n".encode("ascii"))
+        output.write(obj)
+        output.write(b"\nendobj\n")
+    xref_offset = output.tell()
+    output.write(f"xref\n0 {len(objects)}\n".encode("ascii"))
+    output.write(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.write(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.write(
+        (
+            f"trailer\n<< /Size {len(objects)} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return output.getvalue()
+
+
+def _pdf_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _wrap_text(value: str, width: int) -> list[str]:
+    if len(value) <= width:
+        return [value]
+    words = value.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if len(current) + len(word) + 1 > width:
+            if current:
+                lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
+
+
+def _string_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return _clean_text(value)
+
+
 async def _get_json(
     url: str,
     authorization: Optional[str],
@@ -855,11 +1716,17 @@ def _lead_list_params(
     limit: int,
     offset: int,
     date_range: Optional[DateRange] = None,
+    school: str = "",
+    search: str = "",
 ) -> dict[str, str]:
     params = {"limit": str(limit), "offset": str(offset)}
     if date_range is not None:
         params["dateFrom"] = date_range.start.astimezone(timezone.utc).isoformat()
         params["dateTo"] = date_range.end.astimezone(timezone.utc).isoformat()
+    if school:
+        params["school"] = school
+    if search:
+        params["search"] = search
     return params
 
 
@@ -1282,6 +2149,51 @@ def _asks_for_eoi_count(message: str) -> bool:
     )
 
 
+def _asks_for_admissions_payments_report(message: str) -> bool:
+    report_terms = (
+        "report",
+        "laporan",
+        "export",
+        "download",
+        "excel",
+        "xlsx",
+        "pdf",
+        "word",
+        "docx",
+        "markdown",
+        "spreadsheet",
+        "table",
+        "tabel",
+        "show me",
+        "tampilkan",
+        "lihat",
+        "list",
+        "daftar",
+    )
+    eoi_terms = (
+        "eoi",
+        "lead",
+        "admission",
+        "admissions",
+        "pendaftar",
+        "pendaftaran",
+        "registrasi",
+        "registration",
+    )
+    payment_terms = (
+        "payment",
+        "payments",
+        "pembayaran",
+        "tagihan",
+        "invoice",
+        "finance",
+    )
+    has_eoi = any(term in message for term in eoi_terms)
+    has_payment = any(term in message for term in payment_terms)
+    has_report = any(term in message for term in report_terms)
+    return has_eoi and has_payment and has_report
+
+
 def _asks_for_admission_lead_identity(message: str) -> bool:
     identity_terms = ("siapa", "nama", "email", "who", "name")
     lead_terms = (
@@ -1545,6 +2457,39 @@ def _payment_status_from_message(message: str) -> str:
     if "paid" in message or "lunas" in message or "approved" in message:
         return "paid"
     return "pending_verification"
+
+
+def _explicit_payment_status_from_message(message: str) -> Optional[str]:
+    status_terms = (
+        "underpaid",
+        "kurang bayar",
+        "rejected",
+        "ditolak",
+        "paid",
+        "lunas",
+        "approved",
+        "pending",
+        "menunggu",
+        "verification",
+        "verifikasi",
+    )
+    if not any(term in message for term in status_terms):
+        return None
+    return _payment_status_from_message(message)
+
+
+def _asks_for_all_time(message: str) -> bool:
+    all_time_terms = (
+        "all time",
+        "all-time",
+        "all of time",
+        "semua waktu",
+        "semua data",
+        "seluruh waktu",
+        "dari awal",
+        "sejak awal",
+    )
+    return any(term in message for term in all_time_terms)
 
 
 def _payment_status_label(status: str, language: str = "id") -> str:

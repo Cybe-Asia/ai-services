@@ -5,8 +5,8 @@ from typing import Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi.responses import Response, StreamingResponse
 
 from app.auth_context import AdminContext, resolve_admin_context
 from app.config import Settings, get_settings
@@ -26,7 +26,12 @@ from app.schemas import (
     ThreadResponse,
     ToolCallRef,
 )
-from app.service_tools import answer_from_school_tools
+from app.service_tools import (
+    answer_from_school_tools,
+    build_admissions_payments_report,
+    render_admissions_payments_report,
+    report_request_from_export_query,
+)
 from app.thread_store import ThreadNotFound, ThreadStore
 
 app = FastAPI(
@@ -170,6 +175,53 @@ async def delete_thread(
             detail="AI thread history unavailable",
         ) from exc
     return DeleteThreadResponse()
+
+
+@app.get("/api/ai/v1/reports/admissions-payments")
+async def export_admissions_payments_report(
+    export_format: str = Query(default="xlsx", alias="format", max_length=8),
+    date_from: Optional[str] = Query(default=None, alias="dateFrom", max_length=64),
+    date_to: Optional[str] = Query(default=None, alias="dateTo", max_length=64),
+    payment_status: Optional[str] = Query(default=None, alias="paymentStatus", max_length=64),
+    school: Optional[str] = Query(default=None, max_length=16),
+    search: Optional[str] = Query(default=None, max_length=128),
+    limit: int = Query(default=500, ge=1, le=500),
+    locale: str = Query(default="id", max_length=8),
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    await resolve_admin_context(settings, authorization)
+    try:
+        request = report_request_from_export_query(
+            date_from=date_from,
+            date_to=date_to,
+            payment_status=payment_status,
+            school=school,
+            search=search,
+            limit=limit,
+            language=locale,
+        )
+        report = await build_admissions_payments_report(settings, authorization, request)
+        export_file = render_admissions_payments_report(report, export_format)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI report export unavailable",
+        ) from exc
+
+    return Response(
+        content=export_file.body,
+        media_type=export_file.media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{export_file.filename}"',
+        },
+    )
 
 
 @app.post("/api/ai/v1/chat", response_model=ChatResponse)

@@ -1241,6 +1241,144 @@ def test_owner_english_admission_price_returns_english(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_admissions_payment_report_returns_export_links(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params["limit"] == "5"
+            assert params["offset"] == "0"
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "whatsapp": "+628123456789",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "hasApplication": True,
+                            "applicationStatus": "submitted",
+                            "applicantCount": 1,
+                            "latestPaymentStatus": "pending_verification",
+                            "latestPaymentType": "application_fee",
+                            "submittedAt": "2026-06-18T10:00:00Z",
+                        }
+                    ],
+                }
+            }
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert params == {"status": "", "limit": "5", "offset": "0"}
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "paymentId": "PAY-1",
+                        "leadId": "LEAD-1",
+                        "parentName": "Arief Nugraha",
+                        "parentEmail": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "paymentType": "application_fee",
+                        "status": "pending_verification",
+                        "amount": 1000000,
+                        "currency": "IDR",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="export eoi and payment report all time",
+                actor_role=ActorRole.admin,
+                locale="en",
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Admissions + payment report is ready." in result.answer
+    assert "EOI rows: 1 total" in result.answer
+    assert [source.kind for source in result.sources] == ["file", "file", "file", "file"]
+    assert result.sources[0].title == "Download Excel"
+    assert result.sources[0].reference is not None
+    assert result.sources[0].reference.startswith(
+        "/api/admin/ai/reports/admissions-payments?format=xlsx"
+    )
+    assert [(tool.name, tool.status) for tool in result.tool_calls] == [
+        ("report.admissions_payments", "ok"),
+        ("admission.admin_leads_list", "ok"),
+        ("payment.admin_reviews_list", "ok"),
+    ]
+
+
+def test_admin_can_download_admissions_payment_report_xlsx(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "hasApplication": True,
+                            "applicationStatus": "submitted",
+                            "applicantCount": 1,
+                            "latestPaymentStatus": "pending_verification",
+                            "latestPaymentType": "application_fee",
+                            "submittedAt": "2026-06-18T10:00:00Z",
+                        }
+                    ],
+                }
+            }
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "paymentId": "PAY-1",
+                        "leadId": "LEAD-1",
+                        "parentName": "Arief Nugraha",
+                        "parentEmail": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "paymentType": "application_fee",
+                        "status": "pending_verification",
+                        "amount": 1000000,
+                        "currency": "IDR",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    response = client.get(
+        "/api/ai/v1/reports/admissions-payments?format=xlsx&limit=50&locale=en",
+        headers={"authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "digital-school-admissions-payments" in response.headers["content-disposition"]
+    assert response.content.startswith(b"PK")
+
+
 def test_owner_school_specific_admission_price_uses_payment_fee_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://payment-service/api/v1/payments/fees/IISS"
