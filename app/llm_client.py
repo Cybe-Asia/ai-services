@@ -9,7 +9,13 @@ class LlmClient:
     def __init__(self, settings: Settings):
         self._settings = settings
 
-    async def complete(self, system_prompt: str, user_message: str) -> Optional[str]:
+    async def complete(
+        self,
+        system_prompt: str,
+        user_message: str,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+    ) -> Optional[str]:
         if self._settings.ai_provider_base_url is None:
             return None
 
@@ -24,8 +30,8 @@ class LlmClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            "temperature": 0.2,
-            "max_tokens": self._settings.ai_max_tokens,
+            "temperature": temperature,
+            "max_tokens": max_tokens or self._settings.ai_max_tokens,
         }
 
         async with httpx.AsyncClient(timeout=self._settings.request_timeout_seconds) as client:

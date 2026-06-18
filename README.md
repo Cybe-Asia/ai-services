@@ -44,3 +44,10 @@ Useful local/provider settings:
 - Real student-grade answers must come from SIS APIs, not from model memory.
 - Admission and payment facts must come from role-aware service APIs, not from model memory.
 - Prompts and responses should be redacted or summarized in logs.
+
+## Tool Routing
+
+Owner/admin factual prompts are resolved through safe tools. The service first handles known
+patterns deterministically, then uses the configured Llama/OpenAI-compatible provider as an
+intent classifier for paraphrased questions. The model returns an approved tool intent only; the
+actual totals still come from `admission-service` or `payment-service`.

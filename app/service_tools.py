@@ -1,10 +1,17 @@
+import json
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
 
 from app.config import Settings
+from app.llm_client import LlmClient
 from app.schemas import ActorRole, ChatRequest, SourceRef, ToolCallRef
+
+INTENT_NONE = "none"
+INTENT_ADMISSION_EOI_COUNT = "admission_eoi_count"
+INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
+PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 
 
 @dataclass
@@ -12,6 +19,12 @@ class ToolAnswer:
     answer: str
     sources: list[SourceRef]
     tool_calls: list[ToolCallRef]
+
+
+@dataclass(frozen=True)
+class ToolIntent:
+    name: str
+    payment_status: Optional[str] = None
 
 
 async def answer_from_school_tools(
@@ -23,11 +36,130 @@ async def answer_from_school_tools(
         return None
 
     lowered = payload.message.casefold()
-    if _asks_for_eoi_count(lowered):
+    intent = _deterministic_tool_intent(lowered)
+    if intent.name == INTENT_NONE:
+        intent = await _classify_tool_intent(payload.message, settings)
+
+    if intent.name == INTENT_ADMISSION_EOI_COUNT:
         return await _admission_eoi_count(settings, authorization)
-    if _asks_for_payment_review_count(lowered):
-        return await _payment_review_count(settings, authorization, lowered)
+    if intent.name == INTENT_PAYMENT_REVIEW_COUNT:
+        return await _payment_review_count(
+            settings,
+            authorization,
+            lowered,
+            intent.payment_status,
+        )
     return None
+
+
+def _deterministic_tool_intent(message: str) -> ToolIntent:
+    if _asks_for_eoi_count(message):
+        return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
+    if _asks_for_payment_review_count(message):
+        return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, _payment_status_from_message(message))
+    return ToolIntent(INTENT_NONE)
+
+
+async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
+    if settings.ai_provider_base_url is None:
+        return ToolIntent(INTENT_NONE)
+
+    system_prompt = (
+        "You classify Digital Schools admin questions into approved backend tools. "
+        "Return only a JSON object and no prose. "
+        'Use {"intent":"admission_eoi_count"} when the user asks for the total/count '
+        "of EOIs, leads, registrations, applicants, families, or emails registered. "
+        'Use {"intent":"payment_review_count","paymentStatus":"pending_verification"} '
+        "when the user asks for payment, invoice, or manual-transfer review counts. "
+        "Allowed paymentStatus values: pending_verification, paid, rejected, underpaid, "
+        "unknown. If no approved tool fits, return {\"intent\":\"none\"}. "
+        "Never answer facts directly and never invent data."
+    )
+
+    try:
+        raw_intent = await LlmClient(settings).complete(
+            system_prompt=system_prompt,
+            user_message=message,
+            temperature=0.0,
+            max_tokens=96,
+        )
+    except Exception:
+        return ToolIntent(INTENT_NONE)
+
+    return _parse_tool_intent(raw_intent)
+
+
+def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
+    if not raw_intent:
+        return ToolIntent(INTENT_NONE)
+
+    start = raw_intent.find("{")
+    end = raw_intent.rfind("}")
+    if start < 0 or end <= start:
+        return ToolIntent(INTENT_NONE)
+
+    try:
+        body = json.loads(raw_intent[start : end + 1])
+    except json.JSONDecodeError:
+        return ToolIntent(INTENT_NONE)
+
+    if not isinstance(body, dict):
+        return ToolIntent(INTENT_NONE)
+
+    intent = _normalize_intent(body.get("intent"))
+    if intent == INTENT_ADMISSION_EOI_COUNT:
+        return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
+    if intent == INTENT_PAYMENT_REVIEW_COUNT:
+        payment_status = _normalize_payment_status(
+            body.get("paymentStatus") or body.get("payment_status") or body.get("status")
+        )
+        return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, payment_status)
+    return ToolIntent(INTENT_NONE)
+
+
+def _normalize_intent(value: Any) -> str:
+    if not isinstance(value, str):
+        return INTENT_NONE
+
+    normalized = value.casefold().strip().replace("-", "_").replace(".", "_")
+    aliases = {
+        INTENT_ADMISSION_EOI_COUNT: INTENT_ADMISSION_EOI_COUNT,
+        "admission_admin_leads_count": INTENT_ADMISSION_EOI_COUNT,
+        "admission_leads_count": INTENT_ADMISSION_EOI_COUNT,
+        "eoi_count": INTENT_ADMISSION_EOI_COUNT,
+        "lead_count": INTENT_ADMISSION_EOI_COUNT,
+        INTENT_PAYMENT_REVIEW_COUNT: INTENT_PAYMENT_REVIEW_COUNT,
+        "payment_admin_review_count": INTENT_PAYMENT_REVIEW_COUNT,
+        "payment_count": INTENT_PAYMENT_REVIEW_COUNT,
+        "payment_pending_count": INTENT_PAYMENT_REVIEW_COUNT,
+        INTENT_NONE: INTENT_NONE,
+    }
+    return aliases.get(normalized, INTENT_NONE)
+
+
+def _normalize_payment_status(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.casefold().strip().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "pending": "pending_verification",
+        "pending_review": "pending_verification",
+        "pending_verification": "pending_verification",
+        "waiting_verification": "pending_verification",
+        "needs_verification": "pending_verification",
+        "need_verification": "pending_verification",
+        "menunggu_verifikasi": "pending_verification",
+        "verified": "paid",
+        "approved": "paid",
+        "lunas": "paid",
+        "paid": "paid",
+        "rejected": "rejected",
+        "ditolak": "rejected",
+        "underpaid": "underpaid",
+        "kurang_bayar": "underpaid",
+    }
+    return aliases.get(normalized) if normalized not in PAYMENT_STATUSES else normalized
 
 
 async def _admission_eoi_count(settings: Settings, authorization: Optional[str]) -> ToolAnswer:
@@ -56,12 +188,13 @@ async def _payment_review_count(
     settings: Settings,
     authorization: Optional[str],
     lowered_message: str,
+    status_override: Optional[str] = None,
 ) -> ToolAnswer:
     tool_name = "payment.admin_review_count"
     if not _has_bearer_token(authorization):
         return _auth_required(tool_name, "data pembayaran")
 
-    status = _payment_status_from_message(lowered_message)
+    status = status_override or _payment_status_from_message(lowered_message)
     url = _join_url(settings.payment_service_url, "/api/v1/payments/admin/reviews")
     try:
         body = await _get_json(
@@ -143,12 +276,12 @@ def _asks_for_payment_review_count(message: str) -> bool:
 
 
 def _payment_status_from_message(message: str) -> str:
-    if "paid" in message or "lunas" in message or "approved" in message:
-        return "paid"
-    if "rejected" in message or "ditolak" in message:
-        return "rejected"
     if "underpaid" in message or "kurang bayar" in message:
         return "underpaid"
+    if "rejected" in message or "ditolak" in message:
+        return "rejected"
+    if "paid" in message or "lunas" in message or "approved" in message:
+        return "paid"
     return "pending_verification"
 
 
