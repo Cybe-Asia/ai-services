@@ -78,6 +78,45 @@ def test_public_grade_prompt_is_refused() -> None:
     assert response.json()["status"] == "refused"
 
 
+def test_public_current_date_prompt_uses_jakarta_clock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 22, 0, tzinfo=main_module.SCHOOL_TIME_ZONE),
+    )
+
+    response = client.post(
+        "/api/ai/v1/chat",
+        json={"message": "what day is today?", "actorRole": "public", "locale": "en"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "Today is Thursday, June 18, 2026 in Asia/Jakarta."
+    assert body["toolCalls"] == [{"name": "system.current_date", "status": "ok"}]
+
+
+def test_public_current_date_stream_uses_jakarta_clock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 22, 0, tzinfo=main_module.SCHOOL_TIME_ZONE),
+    )
+
+    with client.stream(
+        "POST",
+        "/api/ai/v1/chat/stream",
+        json={"message": "hari apa hari ini?", "actorRole": "public", "locale": "id"},
+    ) as response:
+        payload = response.read().decode()
+
+    assert response.status_code == 200
+    events = parse_sse_events(payload)
+    done = [data for event, data in events if event == "done"][-1]
+    assert done["answer"] == "Hari ini Kamis, 18 Juni 2026 di zona waktu Asia/Jakarta."
+    assert done["toolCalls"] == [{"name": "system.current_date", "status": "ok"}]
+
+
 def test_public_eoi_email_count_prompt_is_refused() -> None:
     response = client.post(
         "/api/ai/v1/chat",
@@ -903,8 +942,100 @@ def test_owner_english_eoi_count_uses_admission_tool(monkeypatch) -> None:
     )
 
     assert result is not None
-    assert "11 EOI" in result.answer
+    assert result.answer == "There are 11 EOIs registered in admission-service."
     assert result.tool_calls[0].name == "admission.admin_leads_count"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_contextual_lead_detail_returns_full_fields(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params == {"limit": "5", "offset": "0", "search": "Arief Nugraha"}
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "applicantCount": 1,
+                        }
+                    ],
+                }
+            }
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1"
+        assert params == {}
+        return {
+            "data": {
+                "detail": {
+                    "lead": {
+                        "parent_name": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "whatsapp": "+628123456789",
+                        "target_school_preference": "SCH-IISS",
+                        "status": "verified",
+                        "setupStep": "students_added",
+                    },
+                    "applicationId": "APP-1",
+                    "applicationStatus": "submitted",
+                    "latestPaymentStatus": "pending_verification",
+                    "latestPaymentType": "application_fee",
+                    "latestPaymentAmount": 1000000,
+                    "applicantCount": 1,
+                },
+                "notes": [],
+                "students": [
+                    {
+                        "fullName": "Aisha Nugraha",
+                        "dateOfBirth": "2019-05-19",
+                        "ageAtApplication": 7,
+                        "currentSchool": "TK A",
+                        "targetGradeLevel": "Grade 1",
+                        "targetSchool": "SCH-IISS",
+                        "applicationMode": "new",
+                        "applicantStatus": "submitted",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="detailnya",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "1. Arief Nugraha (arief@example.test)",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_list", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Detail EOI lengkap untuk Arief Nugraha:" in result.answer
+    assert "- Email: arief@example.test" in result.answer
+    assert "- Mobile/WhatsApp: +628123456789" in result.answer
+    assert (
+        "- Payment terakhir: pending_verification; application_fee; Rp 1.000.000"
+        in result.answer
+    )
+    assert "1. Aisha Nugraha" in result.answer
+    assert "tanggal lahir: 2019-05-19" in result.answer
+    assert "usia saat daftar: 7" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_lead_detail"
     assert result.tool_calls[0].status == "ok"
 
 
@@ -1072,6 +1203,44 @@ def test_owner_admission_price_uses_payment_fee_tool(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_english_admission_price_returns_english(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        assert params == {"payment_type": "application_fee"}
+        school_code = url.rsplit("/", 1)[-1]
+        return {
+            "data": {
+                "feeStructureId": f"FEE-{school_code}",
+                "schoolCode": school_code,
+                "paymentType": "application_fee",
+                "amount": 1000000,
+                "currency": "IDR",
+                "status": "active",
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="how much our application fee?",
+                actor_role=ActorRole.admin,
+                locale="en",
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert result.answer == (
+        "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, "
+        "IIBS: Rp 1.000.000."
+    )
+    assert result.tool_calls[0].name == "payment.application_fee_quote"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_school_specific_admission_price_uses_payment_fee_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://payment-service/api/v1/payments/fees/IISS"
@@ -1197,7 +1366,7 @@ def test_owner_english_payment_count_uses_payment_tool(monkeypatch) -> None:
     )
 
     assert result is not None
-    assert "4 pembayaran" in result.answer
+    assert "There are 4 payments pending verification in payment-service." in result.answer
     assert result.tool_calls[0].name == "payment.admin_review_count"
     assert result.tool_calls[0].status == "ok"
 

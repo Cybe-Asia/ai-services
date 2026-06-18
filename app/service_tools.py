@@ -14,6 +14,7 @@ from app.schemas import ActorRole, ChatRequest, SourceRef, ToolCallRef
 INTENT_NONE = "none"
 INTENT_ADMISSION_EOI_COUNT = "admission_eoi_count"
 INTENT_ADMISSION_LEADS_LIST = "admission_leads_list"
+INTENT_ADMISSION_LEAD_DETAIL = "admission_lead_detail"
 INTENT_ADMISSION_LEAD_CHILD_COUNT = "admission_lead_child_count"
 INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
@@ -104,6 +105,7 @@ async def answer_from_school_tools(
         return None
 
     lowered = payload.message.casefold()
+    language = _answer_language(payload, lowered)
     date_range = _date_range_from_message(lowered)
     intent = _deterministic_tool_intent(lowered)
     if intent.name == INTENT_NONE:
@@ -112,22 +114,37 @@ async def answer_from_school_tools(
         intent = await _classify_tool_intent(payload.message, settings)
 
     if intent.name == INTENT_ADMISSION_EOI_COUNT:
-        return await _admission_eoi_count(settings, authorization, date_range)
+        return await _admission_eoi_count(settings, authorization, date_range, language)
     if intent.name == INTENT_ADMISSION_LEADS_LIST:
-        return await _admission_leads_list(settings, authorization, date_range)
+        return await _admission_leads_list(settings, authorization, date_range, language)
+    if intent.name == INTENT_ADMISSION_LEAD_DETAIL:
+        return await _admission_lead_detail(settings, authorization, payload, lowered, language)
     if intent.name == INTENT_ADMISSION_LEAD_CHILD_COUNT:
-        return await _admission_lead_child_count(settings, authorization, payload, lowered)
+        return await _admission_lead_child_count(
+            settings,
+            authorization,
+            payload,
+            lowered,
+            language,
+        )
     if intent.name == INTENT_ADMISSION_LEAD_STUDENTS_LIST:
-        return await _admission_lead_students_list(settings, authorization, payload, lowered)
+        return await _admission_lead_students_list(
+            settings,
+            authorization,
+            payload,
+            lowered,
+            language,
+        )
     if intent.name == INTENT_PAYMENT_REVIEW_COUNT:
         return await _payment_review_count(
             settings,
             authorization,
             lowered,
             intent.payment_status,
+            language,
         )
     if intent.name == INTENT_PAYMENT_APPLICATION_FEE:
-        return await _payment_application_fee_quote(settings, authorization, lowered)
+        return await _payment_application_fee_quote(settings, authorization, lowered, language)
     return None
 
 
@@ -164,10 +181,13 @@ def _contextual_tool_intent(
         "admission.admin_lead_child_count",
     ):
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
-    if (
-        _asks_for_contextual_lead_identity(lowered_message)
-        or _asks_for_contextual_lead_detail(lowered_message)
-    ) and (
+    if _asks_for_contextual_lead_detail(lowered_message):
+        if _history_has_tool_call(payload, "admission.admin_leads_list"):
+            return ToolIntent(INTENT_ADMISSION_LEAD_DETAIL)
+        if _history_has_tool_call(payload, "admission.admin_leads_count"):
+            return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
+
+    if _asks_for_contextual_lead_identity(lowered_message) and (
         _history_has_tool_call(payload, "admission.admin_leads_count")
         or _history_has_tool_call(payload, "admission.admin_leads_list")
     ):
@@ -236,6 +256,8 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
         return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
     if intent == INTENT_ADMISSION_LEADS_LIST:
         return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
+    if intent == INTENT_ADMISSION_LEAD_DETAIL:
+        return ToolIntent(INTENT_ADMISSION_LEAD_DETAIL)
     if intent == INTENT_ADMISSION_LEAD_CHILD_COUNT:
         return ToolIntent(INTENT_ADMISSION_LEAD_CHILD_COUNT)
     if intent == INTENT_ADMISSION_LEAD_STUDENTS_LIST:
@@ -265,6 +287,10 @@ def _normalize_intent(value: Any) -> str:
         "admission_admin_leads_list": INTENT_ADMISSION_LEADS_LIST,
         "lead_list": INTENT_ADMISSION_LEADS_LIST,
         "eoi_list": INTENT_ADMISSION_LEADS_LIST,
+        INTENT_ADMISSION_LEAD_DETAIL: INTENT_ADMISSION_LEAD_DETAIL,
+        "admission_admin_lead_detail": INTENT_ADMISSION_LEAD_DETAIL,
+        "lead_detail": INTENT_ADMISSION_LEAD_DETAIL,
+        "eoi_detail": INTENT_ADMISSION_LEAD_DETAIL,
         INTENT_ADMISSION_LEAD_CHILD_COUNT: INTENT_ADMISSION_LEAD_CHILD_COUNT,
         "admission_lead_student_count": INTENT_ADMISSION_LEAD_CHILD_COUNT,
         "lead_child_count": INTENT_ADMISSION_LEAD_CHILD_COUNT,
@@ -316,6 +342,7 @@ async def _admission_eoi_count(
     settings: Settings,
     authorization: Optional[str],
     date_range: Optional[DateRange] = None,
+    language: str = "id",
 ) -> ToolAnswer:
     tool_name = "admission.admin_leads_count"
     if not _has_bearer_token(authorization):
@@ -343,9 +370,14 @@ async def _admission_eoi_count(
             "Saya belum bisa mengambil total EOI dari admission-service.",
         )
 
-    scope = f" {date_range.label}" if date_range is not None else ""
+    scope = _date_scope(date_range, language)
+    answer = (
+        f"There are {total} EOIs registered{scope} in admission-service."
+        if language == "en"
+        else f"Ada {total} EOI terdaftar{scope} di admission-service."
+    )
     return ToolAnswer(
-        answer=f"Ada {total} EOI terdaftar{scope} di admission-service.",
+        answer=answer,
         sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
@@ -355,6 +387,7 @@ async def _admission_leads_list(
     settings: Settings,
     authorization: Optional[str],
     date_range: Optional[DateRange] = None,
+    language: str = "id",
 ) -> ToolAnswer:
     tool_name = "admission.admin_leads_list"
     if not _has_bearer_token(authorization):
@@ -382,14 +415,24 @@ async def _admission_leads_list(
             "Saya belum bisa mengambil daftar EOI dari admission-service.",
         )
 
-    scope = f" {date_range.label}" if date_range is not None else ""
+    scope = _date_scope(date_range, language)
     if total == 0 or not rows:
-        answer = f"Belum ada EOI terdaftar{scope} di admission-service."
+        answer = (
+            f"No EOIs are registered{scope} in admission-service."
+            if language == "en"
+            else f"Belum ada EOI terdaftar{scope} di admission-service."
+        )
     else:
         shown = min(len(rows), 5)
-        lines = [f"Ada {total} EOI{scope}. Saya tampilkan {shown} yang terbaru:"]
+        lines = [
+            f"There are {total} EOIs{scope}. Showing the latest {shown}:"
+            if language == "en"
+            else f"Ada {total} EOI{scope}. Saya tampilkan {shown} yang terbaru:"
+        ]
         for index, row in enumerate(rows[:shown], start=1):
-            name = _clean_text(row.get("parentName")) or "Nama belum tersedia"
+            name = _clean_text(row.get("parentName")) or (
+                "Name unavailable" if language == "en" else "Nama belum tersedia"
+            )
             email = _clean_text(row.get("email"))
             school = _clean_text(row.get("school"))
             lead_status = _clean_text(row.get("leadStatus"))
@@ -397,7 +440,7 @@ async def _admission_leads_list(
             if email:
                 details.append(email)
             if school:
-                details.append(f"sekolah: {school}")
+                details.append(f"school: {school}" if language == "en" else f"sekolah: {school}")
             if lead_status:
                 details.append(f"status: {lead_status}")
             suffix = f" ({'; '.join(details)})" if details else ""
@@ -411,11 +454,77 @@ async def _admission_leads_list(
     )
 
 
+async def _admission_lead_detail(
+    settings: Settings,
+    authorization: Optional[str],
+    payload: ChatRequest,
+    lowered_message: str,
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "admission.admin_lead_detail"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "detail EOI")
+
+    query = _lead_search_query_from_context(payload, lowered_message)
+    if not query:
+        return _tool_failed(
+            tool_name,
+            "I need the parent name or EOI email to show the full detail."
+            if language == "en"
+            else "Saya perlu nama parent atau email EOI untuk menampilkan detail lengkap.",
+        )
+
+    try:
+        row, total = await _find_lead_row(settings, authorization, query)
+        if row is None:
+            return ToolAnswer(
+                answer=(
+                    f"I could not find an EOI for '{query}' in admission-service."
+                    if language == "en"
+                    else f"Saya belum menemukan EOI untuk '{query}' di admission-service."
+                ),
+                sources=[],
+                tool_calls=[ToolCallRef(name=tool_name, status="not_found")],
+            )
+        lead_id = _clean_text(row.get("leadId"))
+        if not lead_id:
+            raise ValueError("lead row missing leadId")
+        detail_url = _join_url(
+            settings.admission_service_url,
+            f"/api/leads/v1/admin/leads/{lead_id}",
+        )
+        body = await _get_json(detail_url, authorization, {})
+        detail, lead, students = _extract_lead_detail(body)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil detail EOI dari admission-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil detail EOI dari admission-service.",
+        )
+
+    answer = _format_lead_detail_answer(row, detail, lead, students, total, language)
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service admin lead detail", reference=None)
+        ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
 async def _admission_lead_child_count(
     settings: Settings,
     authorization: Optional[str],
     payload: ChatRequest,
     lowered_message: str,
+    language: str = "id",
 ) -> ToolAnswer:
     tool_name = "admission.admin_lead_child_count"
     if not _has_bearer_token(authorization):
@@ -425,7 +534,9 @@ async def _admission_lead_child_count(
     if not query:
         return _tool_failed(
             tool_name,
-            "Saya perlu nama parent atau email EOI untuk mengecek jumlah anaknya.",
+            "I need the parent name or EOI email to check the child count."
+            if language == "en"
+            else "Saya perlu nama parent atau email EOI untuk mengecek jumlah anaknya.",
         )
 
     try:
@@ -445,7 +556,11 @@ async def _admission_lead_child_count(
         )
 
     if row is None:
-        answer = f"Saya belum menemukan EOI untuk '{query}' di admission-service."
+        answer = (
+            f"I could not find an EOI for '{query}' in admission-service."
+            if language == "en"
+            else f"Saya belum menemukan EOI untuk '{query}' di admission-service."
+        )
     else:
         name = _clean_text(row.get("parentName")) or query
         count = _safe_int(row.get("applicantCount"))
@@ -453,16 +568,28 @@ async def _admission_lead_child_count(
         status = _clean_text(row.get("leadStatus"))
         suffix = []
         if school:
-            suffix.append(f"sekolah: {school}")
+            suffix.append(f"school: {school}" if language == "en" else f"sekolah: {school}")
         if status:
             suffix.append(f"status: {status}")
         if total > 1:
-            suffix.append(f"ada {total} hasil; saya pakai hasil teratas")
+            suffix.append(
+                f"{total} results found; using the top result"
+                if language == "en"
+                else f"ada {total} hasil; saya pakai hasil teratas"
+            )
         detail = f" ({'; '.join(suffix)})" if suffix else ""
         if count == 0:
-            answer = f"{name} belum punya data anak yang tersimpan di aplikasi{detail}."
+            answer = (
+                f"{name} does not have child data saved in the application yet{detail}."
+                if language == "en"
+                else f"{name} belum punya data anak yang tersimpan di aplikasi{detail}."
+            )
         else:
-            answer = f"{name} mendaftarkan {count} anak di aplikasi{detail}."
+            answer = (
+                f"{name} registered {count} children in the application{detail}."
+                if language == "en"
+                else f"{name} mendaftarkan {count} anak di aplikasi{detail}."
+            )
 
     return ToolAnswer(
         answer=answer,
@@ -478,6 +605,7 @@ async def _admission_lead_students_list(
     authorization: Optional[str],
     payload: ChatRequest,
     lowered_message: str,
+    language: str = "id",
 ) -> ToolAnswer:
     tool_name = "admission.admin_lead_students_list"
     if not _has_bearer_token(authorization):
@@ -487,14 +615,20 @@ async def _admission_lead_students_list(
     if not query:
         return _tool_failed(
             tool_name,
-            "Saya perlu nama parent atau email EOI untuk mengecek daftar anaknya.",
+            "I need the parent name or EOI email to check the child list."
+            if language == "en"
+            else "Saya perlu nama parent atau email EOI untuk mengecek daftar anaknya.",
         )
 
     try:
         row, _total = await _find_lead_row(settings, authorization, query)
         if row is None:
             return ToolAnswer(
-                answer=f"Saya belum menemukan EOI untuk '{query}' di admission-service.",
+                answer=(
+                    f"I could not find an EOI for '{query}' in admission-service."
+                    if language == "en"
+                    else f"Saya belum menemukan EOI untuk '{query}' di admission-service."
+                ),
                 sources=[],
                 tool_calls=[ToolCallRef(name=tool_name, status="not_found")],
             )
@@ -523,11 +657,21 @@ async def _admission_lead_students_list(
 
     parent_name = _clean_text(row.get("parentName")) or query
     if not students:
-        answer = f"{parent_name} belum punya data anak yang tersimpan di aplikasi."
+        answer = (
+            f"{parent_name} does not have child data saved in the application yet."
+            if language == "en"
+            else f"{parent_name} belum punya data anak yang tersimpan di aplikasi."
+        )
     else:
-        lines = [f"{parent_name} punya {len(students)} anak di aplikasi:"]
+        lines = [
+            f"{parent_name} has {len(students)} children in the application:"
+            if language == "en"
+            else f"{parent_name} punya {len(students)} anak di aplikasi:"
+        ]
         for index, student in enumerate(students[:5], start=1):
-            name = _clean_text(student.get("fullName")) or "Nama belum tersedia"
+            name = _clean_text(student.get("fullName")) or (
+                "Name unavailable" if language == "en" else "Nama belum tersedia"
+            )
             target_grade = _clean_text(student.get("targetGradeLevel"))
             target_school = _clean_text(student.get("targetSchool"))
             student_status = _clean_text(student.get("applicantStatus"))
@@ -535,7 +679,9 @@ async def _admission_lead_students_list(
             if target_grade:
                 details.append(f"grade: {target_grade}")
             if target_school:
-                details.append(f"sekolah: {target_school}")
+                details.append(
+                    f"school: {target_school}" if language == "en" else f"sekolah: {target_school}"
+                )
             if student_status:
                 details.append(f"status: {student_status}")
             suffix = f" ({'; '.join(details)})" if details else ""
@@ -556,6 +702,7 @@ async def _payment_review_count(
     authorization: Optional[str],
     lowered_message: str,
     status_override: Optional[str] = None,
+    language: str = "id",
 ) -> ToolAnswer:
     tool_name = "payment.admin_review_count"
     if not _has_bearer_token(authorization):
@@ -584,9 +731,14 @@ async def _payment_review_count(
             "Saya belum bisa mengambil data pembayaran dari payment-service.",
         )
 
-    label = _payment_status_label(status)
+    label = _payment_status_label(status, language)
+    answer = (
+        f"There are {total} payments {label} in payment-service."
+        if language == "en"
+        else f"Ada {total} pembayaran {label} di payment-service."
+    )
     return ToolAnswer(
-        answer=f"Ada {total} pembayaran {label} di payment-service.",
+        answer=answer,
         sources=[SourceRef(kind="service", title="payment-service admin reviews", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
@@ -596,6 +748,7 @@ async def _payment_application_fee_quote(
     settings: Settings,
     authorization: Optional[str],
     lowered_message: str,
+    language: str = "id",
 ) -> ToolAnswer:
     tool_name = "payment.application_fee_quote"
     if not _has_bearer_token(authorization):
@@ -623,7 +776,7 @@ async def _payment_application_fee_quote(
             "Saya belum bisa mengambil biaya pendaftaran dari payment-service.",
         )
 
-    fee_label = _payment_type_label(payment_type)
+    fee_label = _payment_type_label(payment_type, language)
     parts = [
         (
             f"{_clean_text(row.get('schoolCode')) or school}: "
@@ -631,7 +784,11 @@ async def _payment_application_fee_quote(
         )
         for row, school in zip(rows, schools)
     ]
-    answer = f"{fee_label.capitalize()} saat ini: {', '.join(parts)}."
+    answer = (
+        f"Current {fee_label}: {', '.join(parts)}."
+        if language == "en"
+        else f"{fee_label.capitalize()} saat ini: {', '.join(parts)}."
+    )
     return ToolAnswer(
         answer=answer,
         sources=[SourceRef(kind="service", title="payment-service fee structures", reference=None)],
@@ -716,6 +873,24 @@ def _extract_student_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
     return [student for student in students if isinstance(student, dict)]
 
 
+def _extract_lead_detail(
+    body: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("service response missing data")
+    detail = data.get("detail")
+    if not isinstance(detail, dict):
+        raise ValueError("service response missing detail")
+    lead = detail.get("lead")
+    if not isinstance(lead, dict):
+        lead = {}
+    students = data.get("students")
+    if not isinstance(students, list):
+        students = []
+    return detail, lead, [student for student in students if isinstance(student, dict)]
+
+
 def _extract_fee_row(body: dict[str, Any]) -> dict[str, Any]:
     data = body.get("data")
     if not isinstance(data, dict):
@@ -724,6 +899,191 @@ def _extract_fee_row(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(amount, int):
         raise ValueError("service response missing amount")
     return data
+
+
+def _format_lead_detail_answer(
+    row: dict[str, Any],
+    detail: dict[str, Any],
+    lead: dict[str, Any],
+    students: list[dict[str, Any]],
+    total: int,
+    language: str,
+) -> str:
+    name = _first_text(lead, row, "parent_name", "parentName") or (
+        "Name unavailable" if language == "en" else "Nama belum tersedia"
+    )
+    email = _first_text(lead, row, "email")
+    mobile = _first_text(lead, row, "mobile", "whatsapp")
+    school = _first_text(lead, row, "target_school_preference", "school")
+    lead_status = _first_text(lead, row, "status", "leadStatus")
+    setup_step = _clean_text(lead.get("setupStep"))
+    application_id = _clean_text(detail.get("applicationId"))
+    application_status = _clean_text(detail.get("applicationStatus"))
+    payment_status = _clean_text(detail.get("latestPaymentStatus"))
+    payment_type = _clean_text(detail.get("latestPaymentType"))
+    payment_amount = detail.get("latestPaymentAmount")
+
+    if language == "en":
+        lines = [f"Full EOI detail for {name}:"]
+        _append_labeled(lines, "Email", email)
+        _append_labeled(lines, "Mobile/WhatsApp", mobile)
+        _append_labeled(lines, "Target school", school)
+        _append_labeled(lines, "Lead status", lead_status)
+        _append_labeled(lines, "Setup step", setup_step)
+        _append_labeled(lines, "Application", _status_with_id(application_status, application_id))
+        _append_labeled(
+            lines,
+            "Latest payment",
+            _payment_summary(payment_status, payment_type, payment_amount),
+        )
+        if total > 1:
+            lines.append(f"Note: {total} matching EOIs found; showing the top result.")
+        lines.extend(_format_student_detail_lines(students, language))
+        if not students:
+            lines.extend(_format_prospective_child_lines(lead, language))
+    else:
+        lines = [f"Detail EOI lengkap untuk {name}:"]
+        _append_labeled(lines, "Email", email)
+        _append_labeled(lines, "Mobile/WhatsApp", mobile)
+        _append_labeled(lines, "Sekolah tujuan", school)
+        _append_labeled(lines, "Status lead", lead_status)
+        _append_labeled(lines, "Setup step", setup_step)
+        _append_labeled(lines, "Aplikasi", _status_with_id(application_status, application_id))
+        _append_labeled(
+            lines,
+            "Payment terakhir",
+            _payment_summary(payment_status, payment_type, payment_amount),
+        )
+        if total > 1:
+            lines.append(f"Catatan: ada {total} EOI cocok; saya tampilkan hasil teratas.")
+        lines.extend(_format_student_detail_lines(students, language))
+        if not students:
+            lines.extend(_format_prospective_child_lines(lead, language))
+
+    return "\n".join(lines)
+
+
+def _format_student_detail_lines(students: list[dict[str, Any]], language: str) -> list[str]:
+    if not students:
+        return ["Children: no submitted child records yet."] if language == "en" else [
+            "Anak: belum ada data anak yang sudah disubmit."
+        ]
+
+    lines = ["Children:"] if language == "en" else ["Anak:"]
+    for index, student in enumerate(students[:5], start=1):
+        name = _clean_text(student.get("fullName")) or (
+            "Name unavailable" if language == "en" else "Nama belum tersedia"
+        )
+        fields = []
+        _append_detail(
+            fields,
+            "date of birth" if language == "en" else "tanggal lahir",
+            student,
+        )
+        _append_detail(
+            fields,
+            "age at application" if language == "en" else "usia saat daftar",
+            student,
+        )
+        _append_detail(fields, "current school" if language == "en" else "sekolah asal", student)
+        _append_detail(fields, "target grade" if language == "en" else "grade tujuan", student)
+        _append_detail(fields, "target school" if language == "en" else "sekolah tujuan", student)
+        _append_detail(fields, "mode", student)
+        _append_detail(fields, "status", student)
+        suffix = f" ({'; '.join(fields)})" if fields else ""
+        lines.append(f"{index}. {name}{suffix}")
+    return lines
+
+
+def _append_detail(fields: list[str], label: str, student: dict[str, Any]) -> None:
+    key_aliases = {
+        "date of birth": ("dateOfBirth",),
+        "tanggal lahir": ("dateOfBirth",),
+        "age at application": ("ageAtApplication",),
+        "usia saat daftar": ("ageAtApplication",),
+        "current school": ("currentSchool",),
+        "sekolah asal": ("currentSchool",),
+        "target grade": ("targetGradeLevel",),
+        "grade tujuan": ("targetGradeLevel",),
+        "target school": ("targetSchool",),
+        "sekolah tujuan": ("targetSchool",),
+        "mode": ("applicationMode",),
+        "status": ("applicantStatus",),
+    }
+    for key in key_aliases[label]:
+        raw_value = student.get(key)
+        value = _clean_text(raw_value)
+        if not value and isinstance(raw_value, int) and not isinstance(raw_value, bool):
+            value = str(raw_value)
+        if value:
+            fields.append(f"{label}: {value}")
+            return
+
+
+def _format_prospective_child_lines(lead: dict[str, Any], language: str) -> list[str]:
+    ages = lead.get("prospective_children_ages")
+    birth_dates = lead.get("prospective_children_birth_dates")
+    if not isinstance(ages, list) and not isinstance(birth_dates, list):
+        return []
+
+    lines = ["EOI child estimate:"] if language == "en" else ["Estimasi anak dari EOI:"]
+    max_len = max(
+        len(ages) if isinstance(ages, list) else 0,
+        len(birth_dates) if isinstance(birth_dates, list) else 0,
+    )
+    for index in range(max_len):
+        fields = []
+        if isinstance(ages, list) and index < len(ages) and isinstance(ages[index], int):
+            fields.append(f"age: {ages[index]}" if language == "en" else f"usia: {ages[index]}")
+        if (
+            isinstance(birth_dates, list)
+            and index < len(birth_dates)
+            and isinstance(birth_dates[index], str)
+            and birth_dates[index].strip()
+        ):
+            label = "birth date" if language == "en" else "tanggal lahir"
+            fields.append(f"{label}: {birth_dates[index].strip()}")
+        if fields:
+            lines.append(f"{index + 1}. {'; '.join(fields)}")
+    return lines if len(lines) > 1 else []
+
+
+def _append_labeled(lines: list[str], label: str, value: Optional[str]) -> None:
+    if value:
+        lines.append(f"- {label}: {value}")
+
+
+def _status_with_id(status: Optional[str], item_id: Optional[str]) -> Optional[str]:
+    if status and item_id:
+        return f"{status} ({item_id})"
+    return status or item_id
+
+
+def _payment_summary(
+    status: Optional[str],
+    payment_type: Optional[str],
+    amount: Any,
+) -> Optional[str]:
+    parts = []
+    if status:
+        parts.append(status)
+    if payment_type:
+        parts.append(payment_type)
+    if isinstance(amount, int):
+        parts.append(_format_money(amount, "IDR"))
+    return "; ".join(parts) if parts else None
+
+
+def _first_text(primary: dict[str, Any], fallback: dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        text = _clean_text(primary.get(key))
+        if text:
+            return text
+    for key in keys:
+        text = _clean_text(fallback.get(key))
+        if text:
+            return text
+    return None
 
 
 def _date_range_from_message(message: str) -> Optional[DateRange]:
@@ -825,6 +1185,22 @@ def _specific_date_from_message(message: str, default_year: int):
     return None
 
 
+def _date_scope(date_range: Optional[DateRange], language: str) -> str:
+    if date_range is None:
+        return ""
+    if language != "en":
+        return f" {date_range.label}"
+    return f" on {_format_date_range_label_en(date_range)}"
+
+
+def _format_date_range_label_en(date_range: DateRange) -> str:
+    start = date_range.start.astimezone(SCHOOL_TIME_ZONE).date()
+    end = date_range.end.astimezone(SCHOOL_TIME_ZONE).date()
+    if start == end:
+        return _format_day_label_en(start)
+    return f"{_format_day_label_en(start)} to {_format_day_label_en(end)}"
+
+
 def _single_day_range(day, label: str) -> DateRange:
     return _range_from_dates(day, day + timedelta(days=1), label)
 
@@ -845,6 +1221,24 @@ def _add_month(value):
 
 def _format_day_label(day) -> str:
     return f"{day.day} {ID_MONTH_NAMES[day.month]} {day.year}"
+
+
+def _format_day_label_en(day) -> str:
+    month_names = {
+        1: "January",
+        2: "February",
+        3: "March",
+        4: "April",
+        5: "May",
+        6: "June",
+        7: "July",
+        8: "August",
+        9: "September",
+        10: "October",
+        11: "November",
+        12: "December",
+    }
+    return f"{month_names[day.month]} {day.day}, {day.year}"
 
 
 def _normalize_year(value: Optional[str], default_year: int) -> int:
@@ -1153,7 +1547,17 @@ def _payment_status_from_message(message: str) -> str:
     return "pending_verification"
 
 
-def _payment_status_label(status: str) -> str:
+def _payment_status_label(status: str, language: str = "id") -> str:
+    if language == "en":
+        if status == "pending_verification":
+            return "pending verification"
+        if status == "paid":
+            return "already paid"
+        if status == "rejected":
+            return "rejected"
+        if status == "underpaid":
+            return "underpaid"
+        return f"with status {status}"
     if status == "pending_verification":
         return "yang menunggu verifikasi"
     if status == "paid":
@@ -1171,7 +1575,13 @@ def _payment_type_from_message(message: str) -> str:
     return "application_fee"
 
 
-def _payment_type_label(payment_type: str) -> str:
+def _payment_type_label(payment_type: str, language: str = "id") -> str:
+    if language == "en":
+        if payment_type == "enrolment_fee":
+            return "enrolment fee"
+        if payment_type == "application_fee":
+            return "application fee"
+        return payment_type.replace("_", " ")
     if payment_type == "enrolment_fee":
         return "biaya enrolment"
     if payment_type == "application_fee":
@@ -1191,6 +1601,35 @@ def _format_money(amount: Any, currency: Any) -> str:
     if currency_text.upper() == "IDR":
         return f"Rp {amount:,}".replace(",", ".")
     return f"{currency_text.upper()} {amount:,}"
+
+
+def _answer_language(payload: ChatRequest, lowered_message: str) -> str:
+    if payload.locale.casefold().startswith("en"):
+        return "en"
+    english_terms = (
+        "how many",
+        "how much",
+        "what is",
+        "what are",
+        "who is",
+        "who are",
+        "which",
+        "show me",
+        "show the",
+        "list the",
+        "more detail",
+        "more details",
+        "full detail",
+        "show details",
+        "details",
+        "registered",
+        "pending verification",
+        "application fee",
+        "children",
+        "student",
+        "students",
+    )
+    return "en" if any(term in lowered_message for term in english_terms) else "id"
 
 
 def _auth_required(tool_name: str, subject: str) -> ToolAnswer:

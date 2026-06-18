@@ -1,7 +1,9 @@
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Optional
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -37,6 +39,37 @@ app = FastAPI(
 SETTINGS_DEPENDENCY = Depends(get_settings)
 AUTH_HEADER = Header(default=None)
 PRIVILEGED_DATA_ROLES = {ActorRole.owner, ActorRole.admin, ActorRole.teacher}
+SCHOOL_TIME_ZONE = ZoneInfo("Asia/Jakarta")
+ID_DAY_NAMES = ("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+ID_MONTH_NAMES = (
+    "Januari",
+    "Februari",
+    "Maret",
+    "April",
+    "Mei",
+    "Juni",
+    "Juli",
+    "Agustus",
+    "September",
+    "Oktober",
+    "November",
+    "Desember",
+)
+EN_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+EN_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
 
 @app.get("/api/v1/ai-service/health", response_model=HealthResponse)
@@ -219,6 +252,15 @@ async def _resolve_chat_response(
             ),
         )
 
+    static_answer = _deterministic_general_answer(payload)
+    if static_answer is not None:
+        return ChatResponse(
+            conversation_id=payload.conversation_id or str(uuid4()),
+            answer=static_answer,
+            sources=[SourceRef(kind="system", title="AI service Jakarta clock", reference=None)],
+            tool_calls=[ToolCallRef(name="system.current_date", status="ok")],
+        )
+
     tool_response = await answer_from_school_tools(payload, settings, authorization)
     if tool_response is not None:
         return ChatResponse(
@@ -267,6 +309,18 @@ async def _stream_chat_events(
                 "Data siswa, nilai, pembayaran, dan ranking hanya boleh diakses lewat role "
                 "yang berwenang."
             ),
+        )
+        async for event in _stream_final_response(response, payload, thread_store, admin_context):
+            yield event
+        return
+
+    static_answer = _deterministic_general_answer(payload)
+    if static_answer is not None:
+        response = ChatResponse(
+            conversation_id=payload.conversation_id,
+            answer=static_answer,
+            sources=[SourceRef(kind="system", title="AI service Jakarta clock", reference=None)],
+            tool_calls=[ToolCallRef(name="system.current_date", status="ok")],
         )
         async for event in _stream_final_response(response, payload, thread_store, admin_context):
             yield event
@@ -446,10 +500,13 @@ async def _draft_answer_chunks(
 
 
 def _draft_system_prompt() -> str:
+    now = _now_jakarta()
     return (
         "You are the Digital Schools AI assistant. Answer in Indonesian unless asked otherwise. "
         "Do not invent school facts, student records, grades, payment data, or dates. "
-        "If official source data or a required tool is unavailable, say that clearly."
+        "If official source data or a required tool is unavailable, say that clearly. "
+        f"The current date in Asia/Jakarta is {_format_date_en(now)} "
+        f"({_format_date_id(now)})."
     )
 
 
@@ -500,6 +557,57 @@ def _fallback_answer(payload: ChatRequest) -> str:
         "dokumen resmi "
         "atau tool dari service pemilik data terlebih dahulu."
     )
+
+
+def _deterministic_general_answer(payload: ChatRequest) -> Optional[str]:
+    lowered = payload.message.casefold().strip()
+    if not _asks_current_date(lowered):
+        return None
+
+    now = _now_jakarta()
+    if _prefers_english(lowered, payload.locale):
+        return f"Today is {_format_date_en(now)} in Asia/Jakarta."
+    return f"Hari ini {_format_date_id(now)} di zona waktu Asia/Jakarta."
+
+
+def _asks_current_date(message: str) -> bool:
+    date_terms = (
+        "what day is today",
+        "what date is today",
+        "what is today",
+        "today date",
+        "current date",
+        "tanggal berapa hari ini",
+        "hari apa hari ini",
+        "sekarang tanggal berapa",
+        "tanggal hari ini",
+    )
+    return any(term in message for term in date_terms)
+
+
+def _prefers_english(message: str, locale: str) -> bool:
+    if locale.casefold().startswith("en"):
+        return True
+    english_terms = ("what day", "what date", "current date", "today")
+    return any(term in message for term in english_terms)
+
+
+def _format_date_id(value: datetime) -> str:
+    return (
+        f"{ID_DAY_NAMES[value.weekday()]}, {value.day} "
+        f"{ID_MONTH_NAMES[value.month - 1]} {value.year}"
+    )
+
+
+def _format_date_en(value: datetime) -> str:
+    return (
+        f"{EN_DAY_NAMES[value.weekday()]}, {EN_MONTH_NAMES[value.month - 1]} "
+        f"{value.day}, {value.year}"
+    )
+
+
+def _now_jakarta() -> datetime:
+    return datetime.now(SCHOOL_TIME_ZONE)
 
 
 def _sources_for_message(message: str) -> list[SourceRef]:
