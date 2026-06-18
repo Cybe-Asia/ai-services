@@ -10,6 +10,7 @@ from app.schemas import ActorRole, ChatRequest, SourceRef, ToolCallRef
 
 INTENT_NONE = "none"
 INTENT_ADMISSION_EOI_COUNT = "admission_eoi_count"
+INTENT_ADMISSION_LEADS_LIST = "admission_leads_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 
@@ -38,10 +39,14 @@ async def answer_from_school_tools(
     lowered = payload.message.casefold()
     intent = _deterministic_tool_intent(lowered)
     if intent.name == INTENT_NONE:
+        intent = _contextual_tool_intent(payload, lowered)
+    if intent.name == INTENT_NONE:
         intent = await _classify_tool_intent(payload.message, settings)
 
     if intent.name == INTENT_ADMISSION_EOI_COUNT:
         return await _admission_eoi_count(settings, authorization)
+    if intent.name == INTENT_ADMISSION_LEADS_LIST:
+        return await _admission_leads_list(settings, authorization)
     if intent.name == INTENT_PAYMENT_REVIEW_COUNT:
         return await _payment_review_count(
             settings,
@@ -55,8 +60,19 @@ async def answer_from_school_tools(
 def _deterministic_tool_intent(message: str) -> ToolIntent:
     if _asks_for_eoi_count(message):
         return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
+    if _asks_for_admission_lead_identity(message):
+        return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
     if _asks_for_payment_review_count(message):
         return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, _payment_status_from_message(message))
+    return ToolIntent(INTENT_NONE)
+
+
+def _contextual_tool_intent(payload: ChatRequest, lowered_message: str) -> ToolIntent:
+    if _asks_for_contextual_lead_identity(lowered_message) and _history_has_tool_call(
+        payload,
+        "admission.admin_leads_count",
+    ):
+        return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
     return ToolIntent(INTENT_NONE)
 
 
@@ -110,6 +126,8 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
     intent = _normalize_intent(body.get("intent"))
     if intent == INTENT_ADMISSION_EOI_COUNT:
         return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
+    if intent == INTENT_ADMISSION_LEADS_LIST:
+        return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
     if intent == INTENT_PAYMENT_REVIEW_COUNT:
         payment_status = _normalize_payment_status(
             body.get("paymentStatus") or body.get("payment_status") or body.get("status")
@@ -129,6 +147,10 @@ def _normalize_intent(value: Any) -> str:
         "admission_leads_count": INTENT_ADMISSION_EOI_COUNT,
         "eoi_count": INTENT_ADMISSION_EOI_COUNT,
         "lead_count": INTENT_ADMISSION_EOI_COUNT,
+        INTENT_ADMISSION_LEADS_LIST: INTENT_ADMISSION_LEADS_LIST,
+        "admission_admin_leads_list": INTENT_ADMISSION_LEADS_LIST,
+        "lead_list": INTENT_ADMISSION_LEADS_LIST,
+        "eoi_list": INTENT_ADMISSION_LEADS_LIST,
         INTENT_PAYMENT_REVIEW_COUNT: INTENT_PAYMENT_REVIEW_COUNT,
         "payment_admin_review_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_count": INTENT_PAYMENT_REVIEW_COUNT,
@@ -188,6 +210,57 @@ async def _admission_eoi_count(settings: Settings, authorization: Optional[str])
 
     return ToolAnswer(
         answer=f"Ada {total} EOI terdaftar di admission-service.",
+        sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+async def _admission_leads_list(settings: Settings, authorization: Optional[str]) -> ToolAnswer:
+    tool_name = "admission.admin_leads_list"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "daftar EOI")
+
+    url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
+    try:
+        body = await _get_json(url, authorization, {"limit": "5", "offset": "0"})
+        rows, total = _extract_lead_rows(body)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil daftar EOI dari admission-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil daftar EOI dari admission-service.",
+        )
+
+    if total == 0 or not rows:
+        answer = "Belum ada EOI terdaftar di admission-service."
+    else:
+        shown = min(len(rows), 5)
+        lines = [f"Ada {total} EOI. Saya tampilkan {shown} yang terbaru:"]
+        for index, row in enumerate(rows[:shown], start=1):
+            name = _clean_text(row.get("parentName")) or "Nama belum tersedia"
+            email = _clean_text(row.get("email"))
+            school = _clean_text(row.get("school"))
+            lead_status = _clean_text(row.get("leadStatus"))
+            details = []
+            if email:
+                details.append(email)
+            if school:
+                details.append(f"sekolah: {school}")
+            if lead_status:
+                details.append(f"status: {lead_status}")
+            suffix = f" ({'; '.join(details)})" if details else ""
+            lines.append(f"{index}. {name}{suffix}")
+        answer = "\n".join(lines)
+
+    return ToolAnswer(
+        answer=answer,
         sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
@@ -261,6 +334,19 @@ def _extract_total(body: dict[str, Any]) -> int:
     return total
 
 
+def _extract_lead_rows(body: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("service response missing data")
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("service response missing rows")
+    total = data.get("total")
+    if not isinstance(total, int):
+        raise ValueError("service response missing total")
+    return [row for row in rows if isinstance(row, dict)], total
+
+
 def _asks_for_eoi_count(message: str) -> bool:
     count_terms = ("berapa", "total", "jumlah", "count", "how many", "number of")
     eoi_terms = (
@@ -282,6 +368,59 @@ def _asks_for_eoi_count(message: str) -> bool:
     return any(term in message for term in count_terms) and any(
         term in message for term in eoi_terms
     )
+
+
+def _asks_for_admission_lead_identity(message: str) -> bool:
+    identity_terms = ("siapa", "nama", "email", "who", "name")
+    lead_terms = (
+        "eoi",
+        "lead",
+        "pendaftar",
+        "daftar",
+        "mendaftar",
+        "registrasi",
+        "registration",
+        "registered",
+        "enquiry",
+        "enquiries",
+        "inquiry",
+        "inquiries",
+    )
+    return any(term in message for term in identity_terms) and any(
+        term in message for term in lead_terms
+    )
+
+
+def _asks_for_contextual_lead_identity(message: str) -> bool:
+    followup_terms = (
+        "siapa orang itu",
+        "siapa itu",
+        "orang itu siapa",
+        "orangnya siapa",
+        "siapa saja",
+        "siapa aja",
+        "nama mereka",
+        "tampilkan orangnya",
+        "show them",
+        "list them",
+        "who is it",
+        "who are they",
+        "who registered",
+    )
+    return any(term in message for term in followup_terms)
+
+
+def _history_has_tool_call(payload: ChatRequest, tool_name: str) -> bool:
+    for turn in payload.history[-10:]:
+        if any(tool.name == tool_name and tool.status == "ok" for tool in turn.tool_calls):
+            return True
+    return False
+
+
+def _clean_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.strip().split())
 
 
 def _asks_for_payment_review_count(message: str) -> bool:

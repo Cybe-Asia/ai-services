@@ -108,10 +108,34 @@ async def _draft_answer(payload: ChatRequest, settings: Settings) -> str:
         "If official source data or a required tool is unavailable, say that clearly."
     )
     try:
-        generated = await client.complete(system_prompt=system_prompt, user_message=payload.message)
+        generated = await client.complete(
+            system_prompt=system_prompt,
+            user_message=_draft_user_message(payload),
+        )
     except Exception:
         generated = None
     return generated or local_fallback
+
+
+def _draft_user_message(payload: ChatRequest) -> str:
+    safe_history = []
+    for turn in payload.history[-8:]:
+        if turn.tool_calls:
+            continue
+        if requires_privileged_role(turn.content):
+            continue
+        safe_history.append(f"{turn.role}: {turn.content.strip()}")
+
+    if not safe_history:
+        return payload.message
+
+    history_text = "\n".join(safe_history)
+    return (
+        "Recent safe conversation context:\n"
+        f"{history_text}\n\n"
+        "Current user message:\n"
+        f"{payload.message}"
+    )
 
 
 def _fallback_answer(payload: ChatRequest) -> str:

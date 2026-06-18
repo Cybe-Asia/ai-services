@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,14 +22,6 @@ class ActorRole(str, Enum):
     student = "student"
 
 
-class ChatRequest(CamelModel):
-    message: str = Field(min_length=1, max_length=4000)
-    actor_role: ActorRole = ActorRole.public
-    locale: str = Field(default="id", max_length=8)
-    conversation_id: Optional[str] = Field(default=None, max_length=128)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class SourceRef(CamelModel):
     kind: str
     title: str
@@ -39,6 +31,22 @@ class SourceRef(CamelModel):
 class ToolCallRef(CamelModel):
     name: str
     status: str
+
+
+class ChatTurn(CamelModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+    status: Optional[str] = Field(default=None, max_length=32)
+    tool_calls: list[ToolCallRef] = Field(default_factory=list, max_length=8)
+
+
+class ChatRequest(CamelModel):
+    message: str = Field(min_length=1, max_length=4000)
+    actor_role: ActorRole = ActorRole.public
+    locale: str = Field(default="id", max_length=8)
+    conversation_id: Optional[str] = Field(default=None, max_length=128)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatResponse(CamelModel):

@@ -214,6 +214,53 @@ def test_owner_registration_count_uses_admission_tool(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_contextual_lead_identity_followup_uses_leads_list_tool(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "5", "offset": "0"}
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "IIEC-RI",
+                        "leadStatus": "new",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="siapa orang itu?",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha" in result.answer
+    assert "arief@example.test" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_list"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_english_eoi_count_uses_admission_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://admission-service/api/leads/v1/admin/leads"
@@ -440,3 +487,9 @@ def test_tool_intent_parser_accepts_fenced_json() -> None:
 
     assert intent.name == service_tools.INTENT_PAYMENT_REVIEW_COUNT
     assert intent.payment_status == "pending_verification"
+
+
+def test_tool_intent_parser_accepts_leads_list_alias() -> None:
+    intent = service_tools._parse_tool_intent('{"intent":"admission_admin_leads_list"}')
+
+    assert intent.name == service_tools.INTENT_ADMISSION_LEADS_LIST
