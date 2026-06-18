@@ -65,12 +65,14 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         return ToolIntent(INTENT_NONE)
 
     system_prompt = (
-        "Classify Digital Schools admin questions. Return compact JSON only. "
-        "Intents: admission_eoi_count for counts of EOIs/leads/registrations/"
-        "applicants/families/emails; payment_review_count for counts of payments/"
-        "invoices/manual transfers/finance transactions; none. "
-        "For payment_review_count include paymentStatus: pending_verification, paid, "
-        "rejected, underpaid, or unknown. Never answer facts directly."
+        "Return JSON only. Classify Digital Schools admin questions into tool intent. "
+        "If user asks count/total/jumlah/berapa of calon keluarga, families, applicants, "
+        "registrations, leads, EOI, or registered emails, use admission_eoi_count. "
+        "If user asks count of transactions, finance checks, payments, invoices, or manual "
+        "transfers, use payment_review_count. Otherwise use none. "
+        'Example: "berapa calon keluarga masuk?" => {"intent":"admission_eoi_count"}. '
+        'Example: "berapa transaksi yang masih perlu dicek finance?" => '
+        '{"intent":"payment_review_count","paymentStatus":"pending_verification"}.'
     )
 
     try:
@@ -79,7 +81,8 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
             user_message=message,
             temperature=0.0,
             max_tokens=32,
-            timeout_seconds=75.0,
+            timeout_seconds=60.0,
+            response_format={"type": "json_object"},
         )
     except Exception:
         return ToolIntent(INTENT_NONE)

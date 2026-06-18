@@ -251,12 +251,14 @@ def test_owner_paraphrased_registration_count_uses_llm_classifier(monkeypatch) -
             temperature=0.2,
             max_tokens=None,
             timeout_seconds=None,
+            response_format=None,
         ):
-            assert "Classify Digital Schools admin questions" in system_prompt
+            assert "Return JSON only" in system_prompt
             assert user_message == "berapa calon keluarga masuk sejauh ini?"
             assert temperature == 0.0
             assert max_tokens == 32
-            assert timeout_seconds == 75.0
+            assert timeout_seconds == 60.0
+            assert response_format == {"type": "json_object"}
             return '{"intent":"admission_eoi_count"}'
 
     async def fake_get_json(url, authorization, params):
@@ -371,12 +373,14 @@ def test_owner_paraphrased_payment_count_uses_llm_classifier(monkeypatch) -> Non
             temperature=0.2,
             max_tokens=None,
             timeout_seconds=None,
+            response_format=None,
         ):
             assert "paymentStatus" in system_prompt
             assert user_message == "berapa transaksi yang masih perlu dicek finance?"
             assert temperature == 0.0
             assert max_tokens == 32
-            assert timeout_seconds == 75.0
+            assert timeout_seconds == 60.0
+            assert response_format == {"type": "json_object"}
             return '{"intent":"payment_review_count","paymentStatus":"waiting_verification"}'
 
     async def fake_get_json(url, authorization, params):
