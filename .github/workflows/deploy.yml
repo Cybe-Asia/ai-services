@@ -47,7 +47,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Build image
         run: docker build -t "${{ steps.vars.outputs.image_ref }}" .
