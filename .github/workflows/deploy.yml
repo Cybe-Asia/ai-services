@@ -1,0 +1,109 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - "qa/**"
+      - "staging/**"
+      - "release-*"
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: ai-services
+  KUSTOMIZE_IMAGE_KEY: ghcr.io/cybe-asia/ai-services
+
+jobs:
+  build-scan-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tag + overlay
+        id: vars
+        run: |
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          IMAGE_TAG="sha-${SHORT_SHA}"
+          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository_owner }}/${SERVICE_NAME}" | tr '[:upper:]' '[:lower:]')
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          case "${GITHUB_REF}" in
+            refs/heads/main)         OVERLAY="lab/dev" ;;
+            refs/heads/qa/*)         OVERLAY="lab/test" ;;
+            refs/heads/staging/*)    OVERLAY="lab/staging" ;;
+            refs/heads/release-*)    OVERLAY="lab/staging" ;;
+            *)                       OVERLAY="" ;;
+          esac
+          echo "overlay_path=${OVERLAY}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build image
+        run: docker build -t "${{ steps.vars.outputs.image_ref }}" .
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.vars.outputs.image_ref }}
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.17.4
+        with:
+          image: ${{ steps.vars.outputs.image_ref }}
+          format: spdx-json
+          artifact-name: ${{ env.SERVICE_NAME }}-sbom-${{ steps.vars.outputs.image_tag }}.spdx.json
+          output-file: sbom.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 90
+
+      - name: Push image
+        run: docker push "${{ steps.vars.outputs.image_ref }}"
+
+      - name: Setup kustomize
+        if: steps.vars.outputs.overlay_path != ''
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Auto-bump gitops overlay
+        if: steps.vars.outputs.overlay_path != ''
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          set -e
+          if [ -z "${GITOPS_TOKEN}" ]; then
+            echo "::warning::GITOPS_TOKEN is not configured; skipping GitOps overlay bump"
+            exit 0
+          fi
+          git config --global user.email "ci-bot@cybe-asia.github"
+          git config --global user.name "CI Bot"
+          git clone --branch main --depth 1 "https://x-access-token:${GITOPS_TOKEN}@github.com/Cybe-Asia/digital-school-gitops.git" gitops-repo
+          cd gitops-repo
+          cd "${{ steps.vars.outputs.overlay_path }}"
+          kustomize edit set image "${{ env.KUSTOMIZE_IMAGE_KEY }}=${{ steps.vars.outputs.image_ref }}"
+          if git diff --quiet kustomization.yaml; then
+            echo "no changes to ${{ steps.vars.outputs.overlay_path }}/kustomization.yaml"
+            exit 0
+          fi
+          git add kustomization.yaml
+          MSG="chore(${{ env.SERVICE_NAME }}): bump ${{ steps.vars.outputs.overlay_path }} to ${{ steps.vars.outputs.image_tag }} [skip ci]"
+          case "${GITHUB_REF}" in
+            refs/heads/qa/*)       MSG="${MSG} [skip promote] (qa branch)" ;;
+            refs/heads/staging/*)  MSG="${MSG} [skip promote] (staging branch — manual promote required)" ;;
+          esac
+          git commit -m "${MSG}"
+          git push origin main
