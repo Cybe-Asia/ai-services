@@ -57,6 +57,41 @@ class ChatResponse(CamelModel):
     tool_calls: list[ToolCallRef] = Field(default_factory=list)
 
 
+class ThreadMessage(CamelModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+    status: Optional[str] = Field(default=None, max_length=32)
+    sources: list[SourceRef] = Field(default_factory=list)
+    tool_calls: list[ToolCallRef] = Field(default_factory=list, max_length=8)
+    created_at: str
+
+
+class ThreadSummary(CamelModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int = Field(ge=0)
+
+
+class ThreadListResponse(CamelModel):
+    threads: list[ThreadSummary] = Field(default_factory=list)
+
+
+class CreateThreadRequest(CamelModel):
+    title: Optional[str] = Field(default=None, max_length=120)
+
+
+class ThreadResponse(CamelModel):
+    thread: ThreadSummary
+    messages: list[ThreadMessage] = Field(default_factory=list)
+
+
+class DeleteThreadResponse(CamelModel):
+    status: str = "ok"
+
+
 class HealthResponse(CamelModel):
     status: str
     service: str

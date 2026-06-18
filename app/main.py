@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
+from app.auth_context import AdminContext, resolve_admin_context
 from app.config import Settings, get_settings
 from app.llm_client import LlmClient
 from app.policy import is_allowed_for_message, requires_privileged_role
@@ -10,12 +11,18 @@ from app.schemas import (
     ActorRole,
     ChatRequest,
     ChatResponse,
+    ChatTurn,
+    CreateThreadRequest,
+    DeleteThreadResponse,
     HealthResponse,
     MetadataResponse,
     SourceRef,
+    ThreadListResponse,
+    ThreadResponse,
     ToolCallRef,
 )
 from app.service_tools import answer_from_school_tools
+from app.thread_store import ThreadNotFound, ThreadStore
 
 app = FastAPI(
     title="Digital Schools AI Service",
@@ -47,6 +54,88 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
     )
 
 
+@app.get("/api/ai/v1/threads", response_model=ThreadListResponse)
+async def list_threads(
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> ThreadListResponse:
+    admin_context = await resolve_admin_context(settings, authorization)
+    try:
+        threads = await ThreadStore(settings).list_threads(admin_context.owner_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI thread history unavailable",
+        ) from exc
+    return ThreadListResponse(threads=threads)
+
+
+@app.post("/api/ai/v1/threads", response_model=ThreadResponse)
+async def create_thread(
+    payload: CreateThreadRequest,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> ThreadResponse:
+    admin_context = await resolve_admin_context(settings, authorization)
+    store = ThreadStore(settings)
+    try:
+        record = await store.create_thread(admin_context.owner_id, payload.title)
+        summary, messages = await store.get_thread(admin_context.owner_id, record["id"])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI thread history unavailable",
+        ) from exc
+    return ThreadResponse(thread=summary, messages=messages)
+
+
+@app.get("/api/ai/v1/threads/{thread_id}", response_model=ThreadResponse)
+async def get_thread(
+    thread_id: str,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> ThreadResponse:
+    admin_context = await resolve_admin_context(settings, authorization)
+    try:
+        summary, messages = await ThreadStore(settings).get_thread(
+            admin_context.owner_id,
+            thread_id,
+        )
+    except ThreadNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Thread not found",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI thread history unavailable",
+        ) from exc
+    return ThreadResponse(thread=summary, messages=messages)
+
+
+@app.delete("/api/ai/v1/threads/{thread_id}", response_model=DeleteThreadResponse)
+async def delete_thread(
+    thread_id: str,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> DeleteThreadResponse:
+    admin_context = await resolve_admin_context(settings, authorization)
+    try:
+        await ThreadStore(settings).delete_thread(admin_context.owner_id, thread_id)
+    except ThreadNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Thread not found",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI thread history unavailable",
+        ) from exc
+    return DeleteThreadResponse()
+
+
 @app.post("/api/ai/v1/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
@@ -59,8 +148,18 @@ async def chat(
             detail="Bearer token required for non-public AI requests",
         )
 
+    admin_context: Optional[AdminContext] = None
+    thread_store: Optional[ThreadStore] = None
+    if payload.actor_role in {ActorRole.owner, ActorRole.admin}:
+        admin_context = await resolve_admin_context(settings, authorization)
+        payload, thread_store = await _with_server_thread_history(
+            payload,
+            settings,
+            admin_context,
+        )
+
     if not is_allowed_for_message(payload.actor_role, payload.message):
-        return ChatResponse(
+        response = ChatResponse(
             conversation_id=payload.conversation_id or str(uuid4()),
             status="refused",
             answer=(
@@ -69,34 +168,119 @@ async def chat(
                 "yang berwenang."
             ),
         )
+        return await _persist_thread_exchange(response, payload, thread_store, admin_context)
 
     tool_response = await answer_from_school_tools(payload, settings, authorization)
     if tool_response is not None:
-        return ChatResponse(
+        response = ChatResponse(
             conversation_id=payload.conversation_id or str(uuid4()),
             answer=tool_response.answer,
             sources=tool_response.sources,
             tool_calls=tool_response.tool_calls,
         )
+        return await _persist_thread_exchange(response, payload, thread_store, admin_context)
 
     if (
         payload.actor_role in PRIVILEGED_DATA_ROLES
         and requires_privileged_role(payload.message)
     ):
-        return ChatResponse(
+        response = ChatResponse(
             conversation_id=payload.conversation_id or str(uuid4()),
             answer=_fallback_answer(payload),
             sources=_sources_for_message(payload.message),
             tool_calls=_tool_calls_for_message(payload.message),
         )
+        return await _persist_thread_exchange(response, payload, thread_store, admin_context)
 
     answer = await _draft_answer(payload, settings)
-    return ChatResponse(
+    response = ChatResponse(
         conversation_id=payload.conversation_id or str(uuid4()),
         answer=answer,
         sources=_sources_for_message(payload.message),
         tool_calls=_tool_calls_for_message(payload.message),
     )
+    return await _persist_thread_exchange(response, payload, thread_store, admin_context)
+
+
+async def _with_server_thread_history(
+    payload: ChatRequest,
+    settings: Settings,
+    admin_context: AdminContext,
+) -> tuple[ChatRequest, Optional[ThreadStore]]:
+    store = ThreadStore(settings)
+    try:
+        record = await store.ensure_thread(
+            admin_context.owner_id,
+            payload.conversation_id,
+            payload.message,
+        )
+    except Exception:
+        return payload, None
+
+    history = _history_from_thread_record(record)
+    if not history:
+        history = payload.history
+
+    return (
+        payload.model_copy(
+            update={
+                "actor_role": admin_context.actor_role,
+                "conversation_id": record["id"],
+                "history": history,
+            }
+        ),
+        store,
+    )
+
+
+async def _persist_thread_exchange(
+    response: ChatResponse,
+    payload: ChatRequest,
+    thread_store: Optional[ThreadStore],
+    admin_context: Optional[AdminContext],
+) -> ChatResponse:
+    if thread_store is None or admin_context is None or response.conversation_id is None:
+        return response
+    try:
+        await thread_store.append_exchange(
+            admin_context.owner_id,
+            response.conversation_id,
+            payload.message,
+            response.answer,
+            response.status,
+            response.sources,
+            response.tool_calls,
+        )
+    except Exception:
+        return response
+    return response
+
+
+def _history_from_thread_record(record: dict) -> list[ChatTurn]:
+    rows = record.get("messages")
+    if not isinstance(rows, list):
+        return []
+    turns: list[ChatTurn] = []
+    for row in rows[-20:]:
+        if not isinstance(row, dict):
+            continue
+        role = row.get("role")
+        content = row.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip():
+            continue
+        turns.append(
+            ChatTurn(
+                role=role,
+                content=content,
+                status=row.get("status") if isinstance(row.get("status"), str) else None,
+                tool_calls=[
+                    ToolCallRef.model_validate(tool)
+                    for tool in row.get("toolCalls", [])
+                    if isinstance(tool, dict)
+                ],
+            )
+        )
+    return turns
 
 
 async def _draft_answer(payload: ChatRequest, settings: Settings) -> str:
@@ -154,9 +338,10 @@ def _fallback_answer(payload: ChatRequest) -> str:
         )
     if requires_privileged_role(payload.message):
         return (
-            "Pertanyaan ini perlu tool data resmi dari SIS/admission/payment service. "
-            "Endpoint AI sudah siap sebagai gateway, tetapi tool backend untuk data tersebut "
-            "belum diaktifkan."
+            "Saya bisa bantu data operasional admin kalau ada tool resmi yang cocok. "
+            "Tool yang aktif saat ini mencakup EOI, detail anak pada lead, review pembayaran, "
+            "dan biaya pendaftaran. Untuk pertanyaan ini saya belum menemukan tool yang tepat, "
+            "jadi saya tidak akan mengarang data."
         )
     return (
         "AI service sudah aktif sebagai gateway awal. Untuk jawaban faktual, hubungkan "

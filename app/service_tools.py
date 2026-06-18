@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -11,8 +12,12 @@ from app.schemas import ActorRole, ChatRequest, SourceRef, ToolCallRef
 INTENT_NONE = "none"
 INTENT_ADMISSION_EOI_COUNT = "admission_eoi_count"
 INTENT_ADMISSION_LEADS_LIST = "admission_leads_list"
+INTENT_ADMISSION_LEAD_CHILD_COUNT = "admission_lead_child_count"
+INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
+INTENT_PAYMENT_APPLICATION_FEE = "payment_application_fee_quote"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
+DEFAULT_SCHOOL_CODES = ("IIHS", "IISS", "IIBS")
 
 
 @dataclass
@@ -47,6 +52,10 @@ async def answer_from_school_tools(
         return await _admission_eoi_count(settings, authorization)
     if intent.name == INTENT_ADMISSION_LEADS_LIST:
         return await _admission_leads_list(settings, authorization)
+    if intent.name == INTENT_ADMISSION_LEAD_CHILD_COUNT:
+        return await _admission_lead_child_count(settings, authorization, payload, lowered)
+    if intent.name == INTENT_ADMISSION_LEAD_STUDENTS_LIST:
+        return await _admission_lead_students_list(settings, authorization, payload, lowered)
     if intent.name == INTENT_PAYMENT_REVIEW_COUNT:
         return await _payment_review_count(
             settings,
@@ -54,10 +63,18 @@ async def answer_from_school_tools(
             lowered,
             intent.payment_status,
         )
+    if intent.name == INTENT_PAYMENT_APPLICATION_FEE:
+        return await _payment_application_fee_quote(settings, authorization, lowered)
     return None
 
 
 def _deterministic_tool_intent(message: str) -> ToolIntent:
+    if _asks_for_lead_child_count(message):
+        return ToolIntent(INTENT_ADMISSION_LEAD_CHILD_COUNT)
+    if _asks_for_lead_child_identity(message):
+        return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
+    if _asks_for_payment_application_fee(message):
+        return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
     if _asks_for_eoi_count(message):
         return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
     if _asks_for_admission_lead_identity(message):
@@ -68,6 +85,11 @@ def _deterministic_tool_intent(message: str) -> ToolIntent:
 
 
 def _contextual_tool_intent(payload: ChatRequest, lowered_message: str) -> ToolIntent:
+    if _asks_for_contextual_lead_child_identity(lowered_message) and _history_has_tool_call(
+        payload,
+        "admission.admin_lead_child_count",
+    ):
+        return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
     if _asks_for_contextual_lead_identity(lowered_message) and _history_has_tool_call(
         payload,
         "admission.admin_leads_count",
@@ -84,11 +106,20 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "Return JSON only. Classify Digital Schools admin questions into tool intent. "
         "If user asks count/total/jumlah/berapa of calon keluarga, families, applicants, "
         "registrations, leads, EOI, or registered emails, use admission_eoi_count. "
+        "If user asks how many children/students a specific lead or EOI parent registered, "
+        "use admission_lead_child_count. "
+        "If user asks who/name/list of children/students for a specific lead, "
+        "use admission_lead_students_list. "
         "If user asks count of transactions, finance checks, payments, invoices, or manual "
-        "transfers, use payment_review_count. Otherwise use none. "
+        "transfers, use payment_review_count. "
+        "If user asks admission/application price, biaya pendaftaran, fee, tariff, or cost, "
+        "use payment_application_fee_quote. Otherwise use none. "
         'Example: "berapa calon keluarga masuk?" => {"intent":"admission_eoi_count"}. '
+        'Example: "Arief Nugraha di EOI daftarin berapa anak?" => '
+        '{"intent":"admission_lead_child_count"}. '
         'Example: "berapa transaksi yang masih perlu dicek finance?" => '
-        '{"intent":"payment_review_count","paymentStatus":"pending_verification"}.'
+        '{"intent":"payment_review_count","paymentStatus":"pending_verification"}. '
+        'Example: "berapa harga admissions?" => {"intent":"payment_application_fee_quote"}.'
     )
 
     try:
@@ -128,11 +159,17 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
         return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
     if intent == INTENT_ADMISSION_LEADS_LIST:
         return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
+    if intent == INTENT_ADMISSION_LEAD_CHILD_COUNT:
+        return ToolIntent(INTENT_ADMISSION_LEAD_CHILD_COUNT)
+    if intent == INTENT_ADMISSION_LEAD_STUDENTS_LIST:
+        return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
     if intent == INTENT_PAYMENT_REVIEW_COUNT:
         payment_status = _normalize_payment_status(
             body.get("paymentStatus") or body.get("payment_status") or body.get("status")
         )
         return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, payment_status)
+    if intent == INTENT_PAYMENT_APPLICATION_FEE:
+        return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
     return ToolIntent(INTENT_NONE)
 
 
@@ -151,10 +188,23 @@ def _normalize_intent(value: Any) -> str:
         "admission_admin_leads_list": INTENT_ADMISSION_LEADS_LIST,
         "lead_list": INTENT_ADMISSION_LEADS_LIST,
         "eoi_list": INTENT_ADMISSION_LEADS_LIST,
+        INTENT_ADMISSION_LEAD_CHILD_COUNT: INTENT_ADMISSION_LEAD_CHILD_COUNT,
+        "admission_lead_student_count": INTENT_ADMISSION_LEAD_CHILD_COUNT,
+        "lead_child_count": INTENT_ADMISSION_LEAD_CHILD_COUNT,
+        "lead_student_count": INTENT_ADMISSION_LEAD_CHILD_COUNT,
+        INTENT_ADMISSION_LEAD_STUDENTS_LIST: INTENT_ADMISSION_LEAD_STUDENTS_LIST,
+        "admission_lead_child_list": INTENT_ADMISSION_LEAD_STUDENTS_LIST,
+        "lead_child_list": INTENT_ADMISSION_LEAD_STUDENTS_LIST,
+        "lead_student_list": INTENT_ADMISSION_LEAD_STUDENTS_LIST,
         INTENT_PAYMENT_REVIEW_COUNT: INTENT_PAYMENT_REVIEW_COUNT,
         "payment_admin_review_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_pending_count": INTENT_PAYMENT_REVIEW_COUNT,
+        INTENT_PAYMENT_APPLICATION_FEE: INTENT_PAYMENT_APPLICATION_FEE,
+        "payment_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
+        "application_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
+        "admission_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
+        "admission_price_quote": INTENT_PAYMENT_APPLICATION_FEE,
         INTENT_NONE: INTENT_NONE,
     }
     return aliases.get(normalized, INTENT_NONE)
@@ -266,6 +316,146 @@ async def _admission_leads_list(settings: Settings, authorization: Optional[str]
     )
 
 
+async def _admission_lead_child_count(
+    settings: Settings,
+    authorization: Optional[str],
+    payload: ChatRequest,
+    lowered_message: str,
+) -> ToolAnswer:
+    tool_name = "admission.admin_lead_child_count"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "jumlah anak di EOI")
+
+    query = _lead_search_query_from_context(payload, lowered_message)
+    if not query:
+        return _tool_failed(
+            tool_name,
+            "Saya perlu nama parent atau email EOI untuk mengecek jumlah anaknya.",
+        )
+
+    try:
+        row, total = await _find_lead_row(settings, authorization, query)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil detail EOI dari admission-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil detail EOI dari admission-service.",
+        )
+
+    if row is None:
+        answer = f"Saya belum menemukan EOI untuk '{query}' di admission-service."
+    else:
+        name = _clean_text(row.get("parentName")) or query
+        count = _safe_int(row.get("applicantCount"))
+        school = _clean_text(row.get("school"))
+        status = _clean_text(row.get("leadStatus"))
+        suffix = []
+        if school:
+            suffix.append(f"sekolah: {school}")
+        if status:
+            suffix.append(f"status: {status}")
+        if total > 1:
+            suffix.append(f"ada {total} hasil; saya pakai hasil teratas")
+        detail = f" ({'; '.join(suffix)})" if suffix else ""
+        if count == 0:
+            answer = f"{name} belum punya data anak yang tersimpan di aplikasi{detail}."
+        else:
+            answer = f"{name} mendaftarkan {count} anak di aplikasi{detail}."
+
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service admin lead detail", reference=None)
+        ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok" if row is not None else "not_found")],
+    )
+
+
+async def _admission_lead_students_list(
+    settings: Settings,
+    authorization: Optional[str],
+    payload: ChatRequest,
+    lowered_message: str,
+) -> ToolAnswer:
+    tool_name = "admission.admin_lead_students_list"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "daftar anak di EOI")
+
+    query = _lead_search_query_from_context(payload, lowered_message)
+    if not query:
+        return _tool_failed(
+            tool_name,
+            "Saya perlu nama parent atau email EOI untuk mengecek daftar anaknya.",
+        )
+
+    try:
+        row, _total = await _find_lead_row(settings, authorization, query)
+        if row is None:
+            return ToolAnswer(
+                answer=f"Saya belum menemukan EOI untuk '{query}' di admission-service.",
+                sources=[],
+                tool_calls=[ToolCallRef(name=tool_name, status="not_found")],
+            )
+        lead_id = _clean_text(row.get("leadId"))
+        if not lead_id:
+            raise ValueError("lead row missing leadId")
+        detail_url = _join_url(
+            settings.admission_service_url,
+            f"/api/leads/v1/admin/leads/{lead_id}",
+        )
+        body = await _get_json(detail_url, authorization, {})
+        students = _extract_student_rows(body)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil daftar anak dari admission-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil daftar anak dari admission-service.",
+        )
+
+    parent_name = _clean_text(row.get("parentName")) or query
+    if not students:
+        answer = f"{parent_name} belum punya data anak yang tersimpan di aplikasi."
+    else:
+        lines = [f"{parent_name} punya {len(students)} anak di aplikasi:"]
+        for index, student in enumerate(students[:5], start=1):
+            name = _clean_text(student.get("fullName")) or "Nama belum tersedia"
+            target_grade = _clean_text(student.get("targetGradeLevel"))
+            target_school = _clean_text(student.get("targetSchool"))
+            student_status = _clean_text(student.get("applicantStatus"))
+            details = []
+            if target_grade:
+                details.append(f"grade: {target_grade}")
+            if target_school:
+                details.append(f"sekolah: {target_school}")
+            if student_status:
+                details.append(f"status: {student_status}")
+            suffix = f" ({'; '.join(details)})" if details else ""
+            lines.append(f"{index}. {name}{suffix}")
+        answer = "\n".join(lines)
+
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service admin lead detail", reference=None)
+        ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
 async def _payment_review_count(
     settings: Settings,
     authorization: Optional[str],
@@ -303,6 +493,53 @@ async def _payment_review_count(
     return ToolAnswer(
         answer=f"Ada {total} pembayaran {label} di payment-service.",
         sources=[SourceRef(kind="service", title="payment-service admin reviews", reference=None)],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+async def _payment_application_fee_quote(
+    settings: Settings,
+    authorization: Optional[str],
+    lowered_message: str,
+) -> ToolAnswer:
+    tool_name = "payment.application_fee_quote"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "data biaya pendaftaran")
+
+    payment_type = _payment_type_from_message(lowered_message)
+    schools = _school_codes_from_message(lowered_message)
+    rows: list[dict[str, Any]] = []
+    try:
+        for school_code in schools:
+            url = _join_url(settings.payment_service_url, f"/api/v1/payments/fees/{school_code}")
+            body = await _get_json(url, authorization, {"payment_type": payment_type})
+            rows.append(_extract_fee_row(body))
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil biaya pendaftaran dari payment-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil biaya pendaftaran dari payment-service.",
+        )
+
+    fee_label = _payment_type_label(payment_type)
+    parts = [
+        (
+            f"{_clean_text(row.get('schoolCode')) or school}: "
+            f"{_format_money(row.get('amount'), row.get('currency'))}"
+        )
+        for row, school in zip(rows, schools)
+    ]
+    answer = f"{fee_label.capitalize()} saat ini: {', '.join(parts)}."
+    return ToolAnswer(
+        answer=answer,
+        sources=[SourceRef(kind="service", title="payment-service fee structures", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
 
@@ -345,6 +582,41 @@ def _extract_lead_rows(body: dict[str, Any]) -> tuple[list[dict[str, Any]], int]
     if not isinstance(total, int):
         raise ValueError("service response missing total")
     return [row for row in rows if isinstance(row, dict)], total
+
+
+async def _find_lead_row(
+    settings: Settings,
+    authorization: Optional[str],
+    query: str,
+) -> tuple[Optional[dict[str, Any]], int]:
+    url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
+    body = await _get_json(
+        url,
+        authorization,
+        {"limit": "5", "offset": "0", "search": query},
+    )
+    rows, total = _extract_lead_rows(body)
+    return (rows[0] if rows else None), total
+
+
+def _extract_student_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("service response missing data")
+    students = data.get("students")
+    if not isinstance(students, list):
+        raise ValueError("service response missing students")
+    return [student for student in students if isinstance(student, dict)]
+
+
+def _extract_fee_row(body: dict[str, Any]) -> dict[str, Any]:
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("service response missing data")
+    amount = data.get("amount")
+    if not isinstance(amount, int):
+        raise ValueError("service response missing amount")
+    return data
 
 
 def _asks_for_eoi_count(message: str) -> bool:
@@ -391,9 +663,47 @@ def _asks_for_admission_lead_identity(message: str) -> bool:
     )
 
 
+def _asks_for_lead_child_count(message: str) -> bool:
+    count_terms = ("berapa", "jumlah", "count", "how many", "number of")
+    child_terms = ("anak", "siswa", "murid", "student", "students", "child", "children", "kid")
+    lead_terms = (
+        "eoi",
+        "lead",
+        "admission",
+        "admissions",
+        "daftarin",
+        "mendaftarkan",
+        "didaftarkan",
+        "applicant",
+        "applicants",
+    )
+    return (
+        any(term in message for term in count_terms)
+        and any(term in message for term in child_terms)
+        and any(term in message for term in lead_terms)
+    )
+
+
+def _asks_for_lead_child_identity(message: str) -> bool:
+    identity_terms = ("siapa", "nama", "who", "name", "list", "daftar")
+    child_terms = (
+        "anak",
+        "anaknya",
+        "siswa",
+        "murid",
+        "child",
+        "children",
+        "kid",
+    )
+    return any(term in message for term in identity_terms) and any(
+        term in message for term in child_terms
+    )
+
+
 def _asks_for_contextual_lead_identity(message: str) -> bool:
     followup_terms = (
         "siapa orang itu",
+        "siapa",
         "siapa itu",
         "orang itu siapa",
         "orangnya siapa",
@@ -410,6 +720,21 @@ def _asks_for_contextual_lead_identity(message: str) -> bool:
     return any(term in message for term in followup_terms)
 
 
+def _asks_for_contextual_lead_child_identity(message: str) -> bool:
+    followup_terms = (
+        "siapa",
+        "siapa anaknya",
+        "anaknya siapa",
+        "nama anaknya",
+        "list anaknya",
+        "tampilkan anaknya",
+        "who",
+        "who are they",
+        "list them",
+    )
+    return any(term == message.strip() or term in message for term in followup_terms)
+
+
 def _history_has_tool_call(payload: ChatRequest, tool_name: str) -> bool:
     for turn in payload.history[-10:]:
         if any(tool.name == tool_name and tool.status == "ok" for tool in turn.tool_calls):
@@ -423,11 +748,102 @@ def _clean_text(value: Any) -> str:
     return " ".join(value.strip().split())
 
 
+def _safe_int(value: Any) -> int:
+    return value if isinstance(value, int) else 0
+
+
+def _lead_search_query_from_context(payload: ChatRequest, lowered_message: str) -> str:
+    query = _lead_search_query_from_message(lowered_message)
+    if query:
+        return query
+
+    for turn in reversed(payload.history[-10:]):
+        if turn.role == "user":
+            query = _lead_search_query_from_message(turn.content.casefold())
+            if query:
+                return query
+        if turn.role == "assistant":
+            query = _lead_search_query_from_assistant(turn.content)
+            if query:
+                return query
+    return ""
+
+
+def _lead_search_query_from_message(message: str) -> str:
+    original = " ".join(message.strip().split())
+    if not original:
+        return ""
+
+    patterns = (
+        r"^(?P<name>.+?)\s+(?:di|dalam|in)\s+(?:eoi|lead|admission|admissions)\b",
+        r"^(?P<name>.+?)\s+(?:dia|mereka)?\s*(?:daftarin|mendaftarkan|didaftarkan)\b",
+        r"^(?P<name>.+?)\s+(?:punya|memiliki)\s+(?:berapa\s+)?(?:anak|siswa|murid)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, original, flags=re.IGNORECASE)
+        if match:
+            return _clean_search_query(match.group("name"))
+
+    if "@" in original:
+        tokens = [token for token in re.split(r"\s+", original) if "@" in token]
+        return _clean_search_query(tokens[0]) if tokens else ""
+    return ""
+
+
+def _lead_search_query_from_assistant(message: str) -> str:
+    match = re.search(r"^\s*\d+\.\s+([^(\n]+)", message, flags=re.MULTILINE)
+    if match:
+        return _clean_search_query(match.group(1))
+    match = re.search(r"^(.+?)\s+(?:mendaftarkan|belum punya data anak)", message)
+    if match:
+        return _clean_search_query(match.group(1))
+    return ""
+
+
+def _clean_search_query(value: str) -> str:
+    cleaned = re.sub(
+        r"\b(?:berapa|jumlah|anak|siswa|murid|child|children|student|students|eoi|lead)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(cleaned.strip(" ?.,:;()[]{}").split())
+
+
 def _asks_for_payment_review_count(message: str) -> bool:
     count_terms = ("berapa", "total", "jumlah", "count", "how many", "number of")
     payment_terms = ("payment", "pembayaran", "tagihan", "invoice", "manual transfer")
-    return any(term in message for term in count_terms) and any(
-        term in message for term in payment_terms
+    review_terms = (
+        "pending",
+        "menunggu",
+        "verifikasi",
+        "verification",
+        "review",
+        "cek finance",
+        "sampai",
+        "masuk",
+        "bukti",
+        "proof",
+    )
+    if not any(term in message for term in payment_terms):
+        return False
+    return any(term in message for term in count_terms) or any(
+        term in message for term in review_terms
+    )
+
+
+def _asks_for_payment_application_fee(message: str) -> bool:
+    price_terms = ("harga", "biaya", "fee", "tarif", "cost", "price")
+    admission_terms = (
+        "admission",
+        "admissions",
+        "pendaftaran",
+        "registrasi",
+        "application",
+        "application fee",
+    )
+    return any(term in message for term in price_terms) and any(
+        term in message for term in admission_terms
     )
 
 
@@ -451,6 +867,34 @@ def _payment_status_label(status: str) -> str:
     if status == "underpaid":
         return "yang kurang bayar"
     return f"dengan status {status}"
+
+
+def _payment_type_from_message(message: str) -> str:
+    if "enrolment" in message or "enrollment" in message:
+        return "enrolment_fee"
+    return "application_fee"
+
+
+def _payment_type_label(payment_type: str) -> str:
+    if payment_type == "enrolment_fee":
+        return "biaya enrolment"
+    if payment_type == "application_fee":
+        return "biaya pendaftaran"
+    return payment_type.replace("_", " ")
+
+
+def _school_codes_from_message(message: str) -> list[str]:
+    codes = [code for code in DEFAULT_SCHOOL_CODES if code.casefold() in message]
+    return codes or list(DEFAULT_SCHOOL_CODES)
+
+
+def _format_money(amount: Any, currency: Any) -> str:
+    if not isinstance(amount, int):
+        raise ValueError("invalid amount")
+    currency_text = currency if isinstance(currency, str) and currency.strip() else "IDR"
+    if currency_text.upper() == "IDR":
+        return f"Rp {amount:,}".replace(",", ".")
+    return f"{currency_text.upper()} {amount:,}"
 
 
 def _auth_required(tool_name: str, subject: str) -> ToolAnswer:

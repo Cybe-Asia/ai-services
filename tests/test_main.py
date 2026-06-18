@@ -1,15 +1,31 @@
 import asyncio
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main as main_module
-from app import service_tools
+from app import service_tools, thread_store
+from app.auth_context import AdminContext
 from app.config import Settings, get_settings
 from app.main import app
 from app.schemas import ActorRole, ChatRequest
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clear_thread_history():
+    thread_store._MEMORY_THREADS.clear()
+    thread_store._MEMORY_OWNER_INDEX.clear()
+    yield
+    thread_store._MEMORY_THREADS.clear()
+    thread_store._MEMORY_OWNER_INDEX.clear()
+
+
+async def fake_admin_context(settings, authorization):
+    assert authorization == "Bearer test-token"
+    return AdminContext(owner_id="owner-1", actor_role=ActorRole.admin)
 
 
 def test_health() -> None:
@@ -94,6 +110,15 @@ def test_public_paraphrased_finance_prompt_is_refused() -> None:
     assert response.json()["status"] == "refused"
 
 
+def test_public_admission_price_prompt_is_refused() -> None:
+    response = client.post(
+        "/api/ai/v1/chat",
+        json={"message": "berapa harga untuk admissions?", "actorRole": "public"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "refused"
+
+
 def test_admin_prompt_requires_bearer_token() -> None:
     response = client.post(
         "/api/ai/v1/chat",
@@ -102,7 +127,8 @@ def test_admin_prompt_requires_bearer_token() -> None:
     assert response.status_code == 401
 
 
-def test_admin_prompt_with_bearer_returns_pending_tool() -> None:
+def test_admin_prompt_with_bearer_returns_pending_tool(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
     response = client.post(
         "/api/ai/v1/chat",
         headers={"authorization": "Bearer test-token"},
@@ -114,6 +140,8 @@ def test_admin_prompt_with_bearer_returns_pending_tool() -> None:
 
 
 def test_admin_sensitive_prompt_without_tool_does_not_call_draft_llm(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
     class ExplodingLlmClient:
         def __init__(self, settings):
             pass
@@ -136,8 +164,102 @@ def test_admin_sensitive_prompt_without_tool_does_not_call_draft_llm(monkeypatch
 
     assert response.status_code == 200
     body = response.json()
-    assert "tool data resmi" in body["answer"]
+    assert "Tool yang aktif" in body["answer"]
     assert body["toolCalls"][0]["status"] == "not_configured"
+
+
+def test_admin_chat_persists_server_side_thread_history(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if params == {"limit": "1", "offset": "0"}:
+            return {"data": {"total": 1}}
+        if params == {"limit": "5", "offset": "0"}:
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "IISS",
+                            "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        raise AssertionError(f"unexpected params: {params}")
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    first = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={"message": "ada berapa eoi sekarang?", "actorRole": "admin"},
+    )
+    assert first.status_code == 200
+    conversation_id = first.json()["conversationId"]
+
+    second = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={
+            "message": "siapa itu?",
+            "actorRole": "admin",
+            "conversationId": conversation_id,
+        },
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["conversationId"] == conversation_id
+    assert "Arief Nugraha" in body["answer"]
+    assert body["toolCalls"][0] == {"name": "admission.admin_leads_list", "status": "ok"}
+
+    listed = client.get(
+        "/api/ai/v1/threads",
+        headers={"authorization": "Bearer test-token"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["threads"][0]["id"] == conversation_id
+    assert listed.json()["threads"][0]["messageCount"] == 4
+
+    loaded = client.get(
+        f"/api/ai/v1/threads/{conversation_id}",
+        headers={"authorization": "Bearer test-token"},
+    )
+    assert loaded.status_code == 200
+    assert [message["role"] for message in loaded.json()["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+def test_admin_can_delete_thread(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    created = client.post(
+        "/api/ai/v1/threads",
+        headers={"authorization": "Bearer test-token"},
+        json={"title": "Ops check"},
+    )
+    assert created.status_code == 200
+    thread_id = created.json()["thread"]["id"]
+
+    deleted = client.delete(
+        f"/api/ai/v1/threads/{thread_id}",
+        headers={"authorization": "Bearer test-token"},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == {"status": "ok"}
+
+    loaded = client.get(
+        f"/api/ai/v1/threads/{thread_id}",
+        headers={"authorization": "Bearer test-token"},
+    )
+    assert loaded.status_code == 404
 
 
 def test_owner_eoi_count_uses_admission_tool(monkeypatch) -> None:
@@ -261,6 +383,116 @@ def test_owner_contextual_lead_identity_followup_uses_leads_list_tool(monkeypatc
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_named_lead_child_count_uses_admission_tool(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "5", "offset": "0", "search": "arief nugraha"}
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "leadId": "LEAD-1",
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "leadStatus": "verified",
+                        "applicantCount": 2,
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="Arief Nugraha di EOI dia daftarin berapa anak",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha mendaftarkan 2 anak" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_lead_child_count"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_contextual_child_identity_followup_uses_detail_tool(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params == {"limit": "5", "offset": "0", "search": "Arief Nugraha"}
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "applicantCount": 2,
+                        }
+                    ],
+                }
+            }
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1"
+        assert params == {}
+        return {
+            "data": {
+                "detail": {},
+                "notes": [],
+                "students": [
+                    {
+                        "fullName": "Aisha Nugraha",
+                        "targetGradeLevel": "Grade 7",
+                        "targetSchool": "SCH-IISS",
+                        "applicantStatus": "submitted",
+                    },
+                    {
+                        "fullName": "Bilal Nugraha",
+                        "targetGradeLevel": "Grade 8",
+                        "targetSchool": "SCH-IISS",
+                        "applicantStatus": "submitted",
+                    },
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="siapa",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "Arief Nugraha mendaftarkan 2 anak di aplikasi.",
+                        "toolCalls": [
+                            {"name": "admission.admin_lead_child_count", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Aisha Nugraha" in result.answer
+    assert "Bilal Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_lead_students_list"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_english_eoi_count_uses_admission_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://admission-service/api/leads/v1/admin/leads"
@@ -358,6 +590,31 @@ def test_owner_payment_count_uses_payment_tool(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_arrived_payment_prompt_uses_payment_tool(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params == {"status": "pending_verification", "limit": "1", "offset": "0"}
+        return {"data": {"total": 5}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="udah ada yang sampai payment?",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "5 pembayaran" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_review_count"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_underpaid_payment_count_uses_underpaid_status(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://payment-service/api/v1/payments/admin/reviews"
@@ -382,6 +639,81 @@ def test_owner_underpaid_payment_count_uses_underpaid_status(monkeypatch) -> Non
     assert "kurang bayar" in result.answer
     assert result.tool_calls[0].name == "payment.admin_review_count"
     assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_admission_price_uses_payment_fee_tool(monkeypatch) -> None:
+    calls = []
+
+    async def fake_get_json(url, authorization, params):
+        calls.append((url, params))
+        assert authorization == "Bearer test-token"
+        assert params == {"payment_type": "application_fee"}
+        school_code = url.rsplit("/", 1)[-1]
+        return {
+            "data": {
+                "feeStructureId": f"FEE-{school_code}",
+                "schoolCode": school_code,
+                "paymentType": "application_fee",
+                "amount": 2200000,
+                "currency": "IDR",
+                "status": "active",
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="berapa harga untuk admissions?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Biaya pendaftaran" in result.answer
+    assert "IIHS: Rp 2.200.000" in result.answer
+    assert "IISS: Rp 2.200.000" in result.answer
+    assert "IIBS: Rp 2.200.000" in result.answer
+    assert [url.rsplit("/", 1)[-1] for url, _params in calls] == ["IIHS", "IISS", "IIBS"]
+    assert result.tool_calls[0].name == "payment.application_fee_quote"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_school_specific_admission_price_uses_payment_fee_tool(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/fees/IISS"
+        assert authorization == "Bearer test-token"
+        assert params == {"payment_type": "application_fee"}
+        return {
+            "data": {
+                "feeStructureId": "FEE-IISS",
+                "schoolCode": "IISS",
+                "paymentType": "application_fee",
+                "amount": 2200000,
+                "currency": "IDR",
+                "status": "active",
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="berapa biaya pendaftaran iiss?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "IISS: Rp 2.200.000" in result.answer
+    assert "IIHS" not in result.answer
+    assert result.tool_calls[0].name == "payment.application_fee_quote"
 
 
 def test_owner_payment_count_reports_forbidden_admin_session(monkeypatch) -> None:
@@ -493,3 +825,9 @@ def test_tool_intent_parser_accepts_leads_list_alias() -> None:
     intent = service_tools._parse_tool_intent('{"intent":"admission_admin_leads_list"}')
 
     assert intent.name == service_tools.INTENT_ADMISSION_LEADS_LIST
+
+
+def test_tool_intent_parser_accepts_fee_quote_alias() -> None:
+    intent = service_tools._parse_tool_intent('{"intent":"admission_price_quote"}')
+
+    assert intent.name == service_tools.INTENT_PAYMENT_APPLICATION_FEE

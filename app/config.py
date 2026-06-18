@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     payment_service_url: str = "http://payment-service"
     request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
 
+    redis_url: Optional[str] = None
+    ai_thread_retention_days: int = Field(default=30, ge=1, le=365)
+    ai_thread_max_threads: int = Field(default=50, ge=1, le=500)
+    ai_thread_max_messages: int = Field(default=100, ge=1, le=500)
+
 
 @lru_cache
 def get_settings() -> Settings:
