@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -26,6 +27,20 @@ def clear_thread_history():
 async def fake_admin_context(settings, authorization):
     assert authorization == "Bearer test-token"
     return AdminContext(owner_id="owner-1", actor_role=ActorRole.admin)
+
+
+def parse_sse_events(payload: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for block in payload.strip().split("\n\n"):
+        event = "message"
+        data = "{}"
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line.removeprefix("event: ").strip()
+            if line.startswith("data: "):
+                data = line.removeprefix("data: ").strip()
+        events.append((event, json.loads(data)))
+    return events
 
 
 def test_health() -> None:
@@ -235,6 +250,77 @@ def test_admin_chat_persists_server_side_thread_history(monkeypatch) -> None:
         "user",
         "assistant",
     ]
+
+
+def test_admin_chat_streams_tool_events_and_persists_thread(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "1", "offset": "0"}
+        return {"data": {"total": 6}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    response = client.post(
+        "/api/ai/v1/chat/stream",
+        headers={"authorization": "Bearer test-token"},
+        json={"message": "ada berapa eoi sekarang?", "actorRole": "admin"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = parse_sse_events(response.text)
+    event_names = [event for event, _data in events]
+    assert event_names[:3] == ["thread", "status", "status"]
+    assert ("tool_call", {"name": "admission.admin_leads_count", "status": "ok"}) in events
+    assert any(event == "delta" and "6 EOI" in data["text"] for event, data in events)
+
+    done = events[-1]
+    assert done[0] == "done"
+    conversation_id = done[1]["conversationId"]
+    assert done[1]["toolCalls"] == [{"name": "admission.admin_leads_count", "status": "ok"}]
+
+    loaded = client.get(
+        f"/api/ai/v1/threads/{conversation_id}",
+        headers={"authorization": "Bearer test-token"},
+    )
+    assert loaded.status_code == 200
+    assert loaded.json()["thread"]["messageCount"] == 2
+
+
+def test_public_chat_streams_llm_deltas(monkeypatch) -> None:
+    class FakeLlmClient:
+        def __init__(self, settings):
+            pass
+
+        async def stream_complete(self, *args, **kwargs):
+            yield "Halo "
+            yield "dari Llama"
+
+        async def complete(self, *args, **kwargs):
+            raise AssertionError("stream endpoint should use stream_complete")
+
+    monkeypatch.setattr(main_module, "LlmClient", FakeLlmClient)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        ai_provider_base_url="http://localhost:11434/v1"
+    )
+    try:
+        response = client.post(
+            "/api/ai/v1/chat/stream",
+            json={"message": "buat sapaan ppdb", "actorRole": "public"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    assert [data["text"] for event, data in events if event == "delta"] == [
+        "Halo ",
+        "dari Llama",
+    ]
+    assert events[-1][1]["answer"] == "Halo dari Llama"
 
 
 def test_admin_can_delete_thread(monkeypatch) -> None:

@@ -1,7 +1,10 @@
+import json
+from collections.abc import AsyncIterator
 from typing import Optional
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from app.auth_context import AdminContext, resolve_admin_context
 from app.config import Settings, get_settings
@@ -142,6 +145,45 @@ async def chat(
     authorization: Optional[str] = AUTH_HEADER,
     settings: Settings = SETTINGS_DEPENDENCY,
 ) -> ChatResponse:
+    payload, thread_store, admin_context = await _prepare_chat_exchange(
+        payload,
+        authorization,
+        settings,
+    )
+    response = await _resolve_chat_response(payload, authorization, settings)
+    return await _persist_thread_exchange(response, payload, thread_store, admin_context)
+
+
+@app.post("/api/ai/v1/chat/stream")
+async def chat_stream(
+    payload: ChatRequest,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> StreamingResponse:
+    payload, thread_store, admin_context = await _prepare_chat_exchange(
+        payload,
+        authorization,
+        settings,
+    )
+    if payload.conversation_id is None:
+        payload = payload.model_copy(update={"conversation_id": str(uuid4())})
+
+    return StreamingResponse(
+        _stream_chat_events(payload, authorization, settings, thread_store, admin_context),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _prepare_chat_exchange(
+    payload: ChatRequest,
+    authorization: Optional[str],
+    settings: Settings,
+) -> tuple[ChatRequest, Optional[ThreadStore], Optional[AdminContext]]:
     if payload.actor_role != ActorRole.public and not _has_bearer_token(authorization):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -158,8 +200,16 @@ async def chat(
             admin_context,
         )
 
+    return payload, thread_store, admin_context
+
+
+async def _resolve_chat_response(
+    payload: ChatRequest,
+    authorization: Optional[str],
+    settings: Settings,
+) -> ChatResponse:
     if not is_allowed_for_message(payload.actor_role, payload.message):
-        response = ChatResponse(
+        return ChatResponse(
             conversation_id=payload.conversation_id or str(uuid4()),
             status="refused",
             answer=(
@@ -168,38 +218,121 @@ async def chat(
                 "yang berwenang."
             ),
         )
-        return await _persist_thread_exchange(response, payload, thread_store, admin_context)
 
     tool_response = await answer_from_school_tools(payload, settings, authorization)
     if tool_response is not None:
-        response = ChatResponse(
+        return ChatResponse(
             conversation_id=payload.conversation_id or str(uuid4()),
             answer=tool_response.answer,
             sources=tool_response.sources,
             tool_calls=tool_response.tool_calls,
         )
-        return await _persist_thread_exchange(response, payload, thread_store, admin_context)
+
+    if (
+        payload.actor_role in PRIVILEGED_DATA_ROLES
+        and requires_privileged_role(payload.message)
+    ):
+        return ChatResponse(
+            conversation_id=payload.conversation_id or str(uuid4()),
+            answer=_fallback_answer(payload),
+            sources=_sources_for_message(payload.message),
+            tool_calls=_tool_calls_for_message(payload.message),
+        )
+
+    answer = await _draft_answer(payload, settings)
+    return ChatResponse(
+        conversation_id=payload.conversation_id or str(uuid4()),
+        answer=answer,
+        sources=_sources_for_message(payload.message),
+        tool_calls=_tool_calls_for_message(payload.message),
+    )
+
+
+async def _stream_chat_events(
+    payload: ChatRequest,
+    authorization: Optional[str],
+    settings: Settings,
+    thread_store: Optional[ThreadStore],
+    admin_context: Optional[AdminContext],
+) -> AsyncIterator[str]:
+    yield _sse_event("thread", {"conversationId": payload.conversation_id})
+    yield _sse_event("status", {"label": "understanding"})
+
+    if not is_allowed_for_message(payload.actor_role, payload.message):
+        response = ChatResponse(
+            conversation_id=payload.conversation_id,
+            status="refused",
+            answer=(
+                "Saya belum bisa membantu pertanyaan itu untuk role ini. "
+                "Data siswa, nilai, pembayaran, dan ranking hanya boleh diakses lewat role "
+                "yang berwenang."
+            ),
+        )
+        async for event in _stream_final_response(response, payload, thread_store, admin_context):
+            yield event
+        return
+
+    yield _sse_event("status", {"label": "checking_tools"})
+    tool_response = await answer_from_school_tools(payload, settings, authorization)
+    if tool_response is not None:
+        response = ChatResponse(
+            conversation_id=payload.conversation_id,
+            answer=tool_response.answer,
+            sources=tool_response.sources,
+            tool_calls=tool_response.tool_calls,
+        )
+        async for event in _stream_final_response(response, payload, thread_store, admin_context):
+            yield event
+        return
 
     if (
         payload.actor_role in PRIVILEGED_DATA_ROLES
         and requires_privileged_role(payload.message)
     ):
         response = ChatResponse(
-            conversation_id=payload.conversation_id or str(uuid4()),
+            conversation_id=payload.conversation_id,
             answer=_fallback_answer(payload),
             sources=_sources_for_message(payload.message),
             tool_calls=_tool_calls_for_message(payload.message),
         )
-        return await _persist_thread_exchange(response, payload, thread_store, admin_context)
+        async for event in _stream_final_response(response, payload, thread_store, admin_context):
+            yield event
+        return
 
-    answer = await _draft_answer(payload, settings)
+    yield _sse_event("status", {"label": "drafting"})
+    chunks: list[str] = []
+    async for chunk in _draft_answer_chunks(payload, settings):
+        chunks.append(chunk)
+        yield _sse_event("delta", {"text": chunk})
+
+    answer = "".join(chunks).strip() or _fallback_answer(payload)
+    if not chunks:
+        for chunk in _text_chunks(answer):
+            yield _sse_event("delta", {"text": chunk})
+
     response = ChatResponse(
-        conversation_id=payload.conversation_id or str(uuid4()),
+        conversation_id=payload.conversation_id,
         answer=answer,
         sources=_sources_for_message(payload.message),
         tool_calls=_tool_calls_for_message(payload.message),
     )
-    return await _persist_thread_exchange(response, payload, thread_store, admin_context)
+    response = await _persist_thread_exchange(response, payload, thread_store, admin_context)
+    yield _sse_event("done", response.model_dump(by_alias=True))
+
+
+async def _stream_final_response(
+    response: ChatResponse,
+    payload: ChatRequest,
+    thread_store: Optional[ThreadStore],
+    admin_context: Optional[AdminContext],
+) -> AsyncIterator[str]:
+    for tool in response.tool_calls:
+        yield _sse_event("tool_call", tool.model_dump(by_alias=True))
+    yield _sse_event("status", {"label": "drafting"})
+    for chunk in _text_chunks(response.answer):
+        yield _sse_event("delta", {"text": chunk})
+    response = await _persist_thread_exchange(response, payload, thread_store, admin_context)
+    yield _sse_event("done", response.model_dump(by_alias=True))
 
 
 async def _with_server_thread_history(
@@ -286,19 +419,38 @@ def _history_from_thread_record(record: dict) -> list[ChatTurn]:
 async def _draft_answer(payload: ChatRequest, settings: Settings) -> str:
     local_fallback = _fallback_answer(payload)
     client = LlmClient(settings)
-    system_prompt = (
-        "You are the Digital Schools AI assistant. Answer in Indonesian unless asked otherwise. "
-        "Do not invent school facts, student records, grades, payment data, or dates. "
-        "If official source data or a required tool is unavailable, say that clearly."
-    )
     try:
         generated = await client.complete(
-            system_prompt=system_prompt,
+            system_prompt=_draft_system_prompt(),
             user_message=_draft_user_message(payload),
         )
     except Exception:
         generated = None
     return generated or local_fallback
+
+
+async def _draft_answer_chunks(
+    payload: ChatRequest,
+    settings: Settings,
+) -> AsyncIterator[str]:
+    client = LlmClient(settings)
+    try:
+        async for chunk in client.stream_complete(
+            system_prompt=_draft_system_prompt(),
+            user_message=_draft_user_message(payload),
+        ):
+            yield chunk
+    except Exception:
+        for chunk in _text_chunks(_fallback_answer(payload)):
+            yield chunk
+
+
+def _draft_system_prompt() -> str:
+    return (
+        "You are the Digital Schools AI assistant. Answer in Indonesian unless asked otherwise. "
+        "Do not invent school facts, student records, grades, payment data, or dates. "
+        "If official source data or a required tool is unavailable, say that clearly."
+    )
 
 
 def _draft_user_message(payload: ChatRequest) -> str:
@@ -366,3 +518,27 @@ def _has_bearer_token(value: Optional[str]) -> bool:
     if value is None:
         return False
     return value.casefold().startswith("bearer ") and len(value.split(" ", 1)[1].strip()) > 0
+
+
+def _sse_event(event: str, data: dict) -> str:
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _text_chunks(text: str, size: int = 28) -> list[str]:
+    if len(text) <= size:
+        return [text] if text else []
+
+    chunks: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        next_value = f"{current} {word}" if current else word
+        if len(next_value) <= size:
+            current = next_value
+            continue
+        if current:
+            chunks.append(f"{current} ")
+        current = word
+    if current:
+        chunks.append(current)
+    return chunks
