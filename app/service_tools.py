@@ -112,15 +112,30 @@ def _extract_total(body: dict[str, Any]) -> int:
 
 
 def _asks_for_eoi_count(message: str) -> bool:
-    count_terms = ("berapa", "total", "jumlah", "count")
-    eoi_terms = ("eoi", "email", "lead", "pendaftar", "terdaftar")
+    count_terms = ("berapa", "total", "jumlah", "count", "how many", "number of")
+    eoi_terms = (
+        "eoi",
+        "email",
+        "lead",
+        "pendaftar",
+        "terdaftar",
+        "daftar",
+        "mendaftar",
+        "registrasi",
+        "registration",
+        "registered",
+        "enquiry",
+        "enquiries",
+        "inquiry",
+        "inquiries",
+    )
     return any(term in message for term in count_terms) and any(
         term in message for term in eoi_terms
     )
 
 
 def _asks_for_payment_review_count(message: str) -> bool:
-    count_terms = ("berapa", "total", "jumlah", "count")
+    count_terms = ("berapa", "total", "jumlah", "count", "how many", "number of")
     payment_terms = ("payment", "pembayaran", "tagihan", "invoice", "manual transfer")
     return any(term in message for term in count_terms) and any(
         term in message for term in payment_terms
