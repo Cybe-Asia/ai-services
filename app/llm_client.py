@@ -25,9 +25,19 @@ class LlmClient:
             return None
 
         base_url = str(self._settings.ai_provider_base_url).rstrip("/")
-        headers = {"content-type": "application/json"}
-        if self._settings.ai_provider_api_key:
-            headers["authorization"] = f"Bearer {self._settings.ai_provider_api_key}"
+        headers = _provider_headers(self._settings)
+        native_base_url = _ollama_native_base_url(self._settings.ai_model, base_url)
+        if native_base_url is not None:
+            return await self._complete_ollama_native(
+                native_base_url,
+                headers,
+                system_prompt,
+                user_message,
+                temperature,
+                max_tokens,
+                timeout_seconds,
+                response_format,
+            )
 
         payload = {
             "model": self._settings.ai_model,
@@ -70,6 +80,45 @@ class LlmClient:
         cleaned = _strip_thinking_content(content).strip()
         return cleaned if cleaned else None
 
+    async def _complete_ollama_native(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        system_prompt: str,
+        user_message: str,
+        temperature: float,
+        max_tokens: Optional[int],
+        timeout_seconds: Optional[float],
+        response_format: Optional[dict[str, str]],
+    ) -> Optional[str]:
+        payload = _ollama_chat_payload(
+            self._settings.ai_model,
+            system_prompt,
+            user_message,
+            temperature,
+            max_tokens or self._settings.ai_max_tokens,
+            stream=False,
+            response_format=response_format,
+        )
+
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/api/chat",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            body = response.json()
+
+        message = body.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, str):
+            return None
+
+        cleaned = _strip_thinking_content(content).strip()
+        return cleaned if cleaned else None
+
     async def stream_complete(
         self,
         system_prompt: str,
@@ -83,9 +132,21 @@ class LlmClient:
             return
 
         base_url = str(self._settings.ai_provider_base_url).rstrip("/")
-        headers = {"content-type": "application/json"}
-        if self._settings.ai_provider_api_key:
-            headers["authorization"] = f"Bearer {self._settings.ai_provider_api_key}"
+        headers = _provider_headers(self._settings)
+        native_base_url = _ollama_native_base_url(self._settings.ai_model, base_url)
+        if native_base_url is not None:
+            async for chunk in self._stream_ollama_native(
+                native_base_url,
+                headers,
+                system_prompt,
+                user_message,
+                temperature,
+                max_tokens,
+                timeout_seconds,
+                response_format,
+            ):
+                yield chunk
+            return
 
         payload = {
             "model": self._settings.ai_model,
@@ -143,6 +204,99 @@ class LlmClient:
                 cleaned = thinking_filter.flush()
                 if cleaned:
                     yield cleaned
+
+    async def _stream_ollama_native(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        system_prompt: str,
+        user_message: str,
+        temperature: float,
+        max_tokens: Optional[int],
+        timeout_seconds: Optional[float],
+        response_format: Optional[dict[str, str]],
+    ) -> AsyncIterator[str]:
+        payload = _ollama_chat_payload(
+            self._settings.ai_model,
+            system_prompt,
+            user_message,
+            temperature,
+            max_tokens or self._settings.ai_max_tokens,
+            stream=True,
+            response_format=response_format,
+        )
+
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{base_url}/api/chat",
+                json=payload,
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                thinking_filter = _ThinkingContentFilter()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        body = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    message = body.get("message") or {}
+                    content = message.get("content")
+                    if isinstance(content, str) and content:
+                        cleaned = thinking_filter.feed(content)
+                        if cleaned:
+                            yield cleaned
+                    if body.get("done") is True:
+                        break
+
+                cleaned = thinking_filter.flush()
+                if cleaned:
+                    yield cleaned
+
+
+def _provider_headers(settings: Settings) -> dict[str, str]:
+    headers = {"content-type": "application/json"}
+    if settings.ai_provider_api_key:
+        headers["authorization"] = f"Bearer {settings.ai_provider_api_key}"
+    return headers
+
+
+def _ollama_chat_payload(
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    temperature: float,
+    max_tokens: int,
+    stream: bool,
+    response_format: Optional[dict[str, str]],
+) -> dict:
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": _apply_model_prompt_controls(model, user_message)},
+        ],
+        "stream": stream,
+        "think": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+    if response_format and response_format.get("type") == "json_object":
+        payload["format"] = "json"
+    return payload
+
+
+def _ollama_native_base_url(model: str, base_url: str) -> Optional[str]:
+    if not _is_qwen3_model(model):
+        return None
+    if "ollama" not in base_url.casefold() and ":11434" not in base_url:
+        return None
+    return base_url[:-3] if base_url.endswith("/v1") else base_url
 
 
 def _apply_model_prompt_controls(model: str, user_message: str) -> str:
