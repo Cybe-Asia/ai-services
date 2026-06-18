@@ -15,6 +15,7 @@ from app.schemas import (
     SourceRef,
     ToolCallRef,
 )
+from app.service_tools import answer_from_school_tools
 
 app = FastAPI(
     title="Digital Schools AI Service",
@@ -41,6 +42,7 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
         provider_configured=settings.ai_provider_base_url is not None,
         sis_service_url=settings.sis_service_url,
         admission_service_url=settings.admission_service_url,
+        payment_service_url=settings.payment_service_url,
     )
 
 
@@ -65,6 +67,15 @@ async def chat(
                 "Data siswa, nilai, pembayaran, dan ranking hanya boleh diakses lewat role "
                 "yang berwenang."
             ),
+        )
+
+    tool_response = await answer_from_school_tools(payload, settings, authorization)
+    if tool_response is not None:
+        return ChatResponse(
+            conversation_id=payload.conversation_id or str(uuid4()),
+            answer=tool_response.answer,
+            sources=tool_response.sources,
+            tool_calls=tool_response.tool_calls,
         )
 
     answer = await _draft_answer(payload, settings)

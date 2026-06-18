@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     sis_service_url: str = "http://sis-service"
     admission_service_url: str = "http://admission-service"
+    payment_service_url: str = "http://payment-service"
     request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
 
 

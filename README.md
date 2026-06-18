@@ -34,10 +34,13 @@ Useful local/provider settings:
 - `AI_MODEL`: provider model name.
 - `AI_MAX_TOKENS`: response cap sent to the provider.
 - `REQUEST_TIMEOUT_SECONDS`: provider request timeout.
+- `ADMISSION_SERVICE_URL`: admission-service base URL for owner/admin aggregate tools.
+- `PAYMENT_SERVICE_URL`: payment-service base URL for owner/admin aggregate tools.
 
 ## Boundaries
 
 - `ai-services` may call `sis-services`, `admission-services`, and other owning services through explicit APIs.
 - It must not bypass ownership boundaries with direct graph/database queries for sensitive data.
 - Real student-grade answers must come from SIS APIs, not from model memory.
+- Admission and payment facts must come from role-aware service APIs, not from model memory.
 - Prompts and responses should be redacted or summarized in logs.

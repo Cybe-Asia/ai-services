@@ -62,3 +62,4 @@ class MetadataResponse(CamelModel):
     provider_configured: bool
     sis_service_url: str
     admission_service_url: str
+    payment_service_url: str
