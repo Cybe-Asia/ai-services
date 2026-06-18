@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app import service_tools
@@ -122,6 +123,30 @@ def test_owner_eoi_count_uses_admission_tool(monkeypatch) -> None:
     assert "7 EOI" in result.answer
     assert result.tool_calls[0].name == "admission.admin_leads_count"
     assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_eoi_count_reports_expired_admin_session(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        request = httpx.Request("GET", url)
+        response = httpx.Response(401, request=request)
+        raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa email yang terdaftar di EOI?",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer expired-token",
+        )
+    )
+
+    assert result is not None
+    assert "login ulang" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_count"
+    assert result.tool_calls[0].status == "auth_required"
 
 
 def test_owner_registration_count_uses_admission_tool(monkeypatch) -> None:
@@ -260,6 +285,30 @@ def test_owner_underpaid_payment_count_uses_underpaid_status(monkeypatch) -> Non
     assert "kurang bayar" in result.answer
     assert result.tool_calls[0].name == "payment.admin_review_count"
     assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_payment_count_reports_forbidden_admin_session(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        request = httpx.Request("GET", url)
+        response = httpx.Response(403, request=request)
+        raise httpx.HTTPStatusError("forbidden", request=request, response=response)
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa pembayaran pending?",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer non-admin-token",
+        )
+    )
+
+    assert result is not None
+    assert "akses admin" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_review_count"
+    assert result.tool_calls[0].status == "forbidden"
 
 
 def test_owner_paraphrased_payment_count_uses_llm_classifier(monkeypatch) -> None:

@@ -171,6 +171,14 @@ async def _admission_eoi_count(settings: Settings, authorization: Optional[str])
     try:
         body = await _get_json(url, authorization, {"limit": "1", "offset": "0"})
         total = _extract_total(body)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil total EOI dari admission-service.",
+        )
     except Exception:
         return _tool_failed(
             tool_name,
@@ -203,6 +211,14 @@ async def _payment_review_count(
             {"status": status, "limit": "1", "offset": "0"},
         )
         total = _extract_total(body)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil data pembayaran dari payment-service.",
+        )
     except Exception:
         return _tool_failed(
             tool_name,
@@ -311,6 +327,28 @@ def _tool_failed(tool_name: str, answer: str) -> ToolAnswer:
         sources=[],
         tool_calls=[ToolCallRef(name=tool_name, status="error")],
     )
+
+
+def _auth_status_tool_error(tool_name: str, status_code: int) -> Optional[ToolAnswer]:
+    if status_code == 401:
+        return ToolAnswer(
+            answer=(
+                "Sesi admin tidak valid atau sudah kedaluwarsa. "
+                "Silakan login ulang sebelum meminta data operasional."
+            ),
+            sources=[],
+            tool_calls=[ToolCallRef(name=tool_name, status="auth_required")],
+        )
+    if status_code == 403:
+        return ToolAnswer(
+            answer=(
+                "Akun ini belum punya akses admin untuk mengambil data operasional. "
+                "Pastikan email akun terdaftar di allowlist admin."
+            ),
+            sources=[],
+            tool_calls=[ToolCallRef(name=tool_name, status="forbidden")],
+        )
+    return None
 
 
 def _join_url(base_url: str, path: str) -> str:
