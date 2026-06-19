@@ -2651,7 +2651,22 @@ def _asks_for_contextual_report_export(message: str) -> bool:
 
 
 def _asks_for_admission_lead_identity(message: str) -> bool:
-    identity_terms = ("siapa", "nama", "email", "who", "name")
+    identity_terms = (
+        "siapa",
+        "nama",
+        "email",
+        "who",
+        "name",
+        "list",
+        "show",
+        "tampilkan",
+        "lihat",
+        "yang daftar",
+        "yang mendaftar",
+        "yang terdaftar",
+        "registered people",
+        "registered parents",
+    )
     lead_terms = (
         "eoi",
         "lead",

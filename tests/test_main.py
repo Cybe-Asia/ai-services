@@ -629,7 +629,7 @@ def test_owner_contextual_lead_identity_followup_uses_leads_list_tool(monkeypatc
     assert result.tool_calls[0].status == "ok"
 
 
-def test_owner_contextual_registered_eoi_followup_uses_leads_list_tool(monkeypatch) -> None:
+def test_owner_registered_eoi_identity_prompt_uses_leads_list_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://admission-service/api/leads/v1/admin/leads"
         assert authorization == "Bearer test-token"
@@ -654,15 +654,6 @@ def test_owner_contextual_registered_eoi_followup_uses_leads_list_tool(monkeypat
             ChatRequest(
                 message="Yang daftar eoi",
                 actor_role=ActorRole.admin,
-                history=[
-                    {
-                        "role": "assistant",
-                        "content": "Ada 1 EOI terdaftar hari ini di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
-                    }
-                ],
             ),
             Settings(),
             "Bearer test-token",
