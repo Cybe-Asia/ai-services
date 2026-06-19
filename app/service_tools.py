@@ -175,14 +175,16 @@ async def answer_from_school_tools(
         lowered
     ):
         return await _operations_brief_answer(settings, authorization, lowered, language)
-    if _asks_for_current_date(lowered):
+
+    deterministic_intent = _deterministic_tool_intent(lowered)
+    if deterministic_intent.name == INTENT_CURRENT_DATE:
         return _current_date_answer(language)
 
     if payload.actor_role not in {ActorRole.owner, ActorRole.admin}:
         return None
 
     date_range = _date_range_from_message(lowered)
-    intent = _deterministic_tool_intent(lowered)
+    intent = deterministic_intent
     if intent.name == INTENT_NONE:
         intent = _contextual_tool_intent(payload, lowered, date_range)
     if intent.name == INTENT_NONE:
@@ -239,8 +241,6 @@ async def answer_from_school_tools(
 def _deterministic_tool_intent(message: str) -> ToolIntent:
     if _asks_for_operations_brief(message):
         return ToolIntent(INTENT_OPERATIONS_BRIEF)
-    if _asks_for_current_date(message):
-        return ToolIntent(INTENT_CURRENT_DATE)
     if _asks_for_admissions_payments_report(message):
         return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
     if _asks_for_lead_child_count(message):
@@ -255,6 +255,8 @@ def _deterministic_tool_intent(message: str) -> ToolIntent:
         return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
     if _asks_for_payment_review_count(message):
         return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, _payment_status_from_message(message))
+    if _asks_for_current_date(message):
+        return ToolIntent(INTENT_CURRENT_DATE)
     return ToolIntent(INTENT_NONE)
 
 
@@ -2483,7 +2485,12 @@ def _asks_for_current_date(message: str) -> bool:
         "payment",
         "pembayaran",
         "pendaftar",
+        "daftar",
+        "mendaftar",
+        "terdaftar",
         "registrasi",
+        "registration",
+        "registered",
         "admission",
         "admissions",
     )
@@ -2718,7 +2725,26 @@ def _asks_for_contextual_lead_identity(message: str) -> bool:
         "who are they",
         "who registered",
     )
-    return any(term in message for term in followup_terms)
+    if any(term in message for term in followup_terms):
+        return True
+
+    lead_terms = (
+        "eoi",
+        "lead",
+        "pendaftar",
+        "daftar",
+        "mendaftar",
+        "terdaftar",
+        "registrasi",
+        "registration",
+        "registered",
+        "applicant",
+        "applicants",
+    )
+    contextual_subject_terms = ("yang", "mereka", "orang", "parent", "parents")
+    return any(term in message for term in contextual_subject_terms) and any(
+        term in message for term in lead_terms
+    )
 
 
 def _asks_for_contextual_lead_detail(message: str) -> bool:
