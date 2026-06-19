@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -45,6 +46,7 @@ SETTINGS_DEPENDENCY = Depends(get_settings)
 AUTH_HEADER = Header(default=None)
 PRIVILEGED_DATA_ROLES = {ActorRole.owner, ActorRole.admin, ActorRole.teacher}
 SCHOOL_TIME_ZONE = ZoneInfo("Asia/Jakarta")
+DRAFT_STREAM_CHUNK_TIMEOUT_SECONDS = 20.0
 ID_DAY_NAMES = ("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
 ID_MONTH_NAMES = (
     "Januari",
@@ -540,13 +542,21 @@ async def _draft_answer_chunks(
     settings: Settings,
 ) -> AsyncIterator[str]:
     client = LlmClient(settings)
+    stream_timeout = min(settings.request_timeout_seconds, DRAFT_STREAM_CHUNK_TIMEOUT_SECONDS)
+    stream = client.stream_complete(
+        system_prompt=_draft_system_prompt(),
+        user_message=_draft_user_message(payload),
+        timeout_seconds=stream_timeout,
+    )
     try:
-        async for chunk in client.stream_complete(
-            system_prompt=_draft_system_prompt(),
-            user_message=_draft_user_message(payload),
-        ):
+        while True:
+            chunk = await asyncio.wait_for(stream.__anext__(), timeout=stream_timeout)
             yield chunk
+    except StopAsyncIteration:
+        return
     except Exception:
+        if hasattr(stream, "aclose"):
+            await stream.aclose()
         for chunk in _text_chunks(_fallback_answer(payload)):
             yield chunk
 

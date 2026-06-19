@@ -416,6 +416,38 @@ def test_public_chat_streams_llm_deltas(monkeypatch) -> None:
     assert events[-1][1]["answer"] == "Halo dari Llama"
 
 
+def test_public_chat_stream_falls_back_when_llm_stream_stalls(monkeypatch) -> None:
+    class SlowLlmClient:
+        def __init__(self, settings):
+            pass
+
+        async def stream_complete(self, *args, **kwargs):
+            assert kwargs["timeout_seconds"] == 0.05
+            await asyncio.sleep(1)
+            yield "late answer"
+
+    monkeypatch.setattr(main_module, "DRAFT_STREAM_CHUNK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(main_module, "LlmClient", SlowLlmClient)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        ai_provider_base_url="http://localhost:11434/v1",
+        request_timeout_seconds=1.0,
+    )
+    try:
+        response = client.post(
+            "/api/ai/v1/chat/stream",
+            json={"message": "halo", "actorRole": "public"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    streamed_text = "".join(data["text"] for event, data in events if event == "delta")
+    assert "AI service sudah aktif" in streamed_text
+    assert "late answer" not in streamed_text
+    assert events[-1][0] == "done"
+
+
 def test_admin_can_delete_thread(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
 
@@ -1386,6 +1418,80 @@ def test_owner_admissions_payment_report_returns_export_links(monkeypatch) -> No
         ("admission.admin_leads_list", "ok"),
         ("payment.admin_reviews_list", "ok"),
     ]
+
+
+def test_owner_contextual_pdf_export_uses_report_tool_and_recent_date(monkeypatch) -> None:
+    class ExplodingLlmClient:
+        def __init__(self, settings):
+            pass
+
+        async def complete(self, *args, **kwargs):
+            raise AssertionError("contextual PDF export should not call the LLM classifier")
+
+    monkeypatch.setattr(service_tools, "LlmClient", ExplodingLlmClient)
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-17T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "latestPaymentStatus": "pending_verification",
+                        }
+                    ],
+                }
+            }
+
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert params["status"] == ""
+        return {"data": {"total": 0, "rows": []}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="convert ke pdf dong",
+                actor_role=ActorRole.admin,
+                history=[
+                    {"role": "user", "content": "kalau kemarin?"},
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar kemarin (18 Juni 2026).",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    },
+                ],
+            ),
+            Settings(ai_provider_base_url="http://localhost:11434/v1"),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Laporan EOI + pembayaran sudah siap." in result.answer
+    assert "kemarin (18 Juni 2026)" in result.answer
+    pdf_source = next(source for source in result.sources if source.title == "Download PDF")
+    assert pdf_source.reference is not None
+    assert "format=pdf" in pdf_source.reference
+    assert "dateFrom=" in pdf_source.reference
+    assert result.tool_calls[0].name == "report.admissions_payments"
 
 
 def test_admin_can_download_admissions_payment_report_xlsx(monkeypatch) -> None:

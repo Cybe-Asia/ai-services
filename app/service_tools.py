@@ -187,6 +187,7 @@ async def answer_from_school_tools(
         return await _admissions_payments_report_answer(
             settings,
             authorization,
+            payload,
             lowered,
             language,
         )
@@ -264,6 +265,11 @@ def _contextual_tool_intent(
                 INTENT_PAYMENT_REVIEW_COUNT,
                 _payment_status_from_message(lowered_message),
             )
+
+    if _asks_for_contextual_report_export(lowered_message) and _history_has_reportable_tool_call(
+        payload
+    ):
+        return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
 
     if _asks_for_contextual_lead_child_identity(lowered_message) and _history_has_tool_call(
         payload,
@@ -953,6 +959,7 @@ def _current_date_answer(language: str = "id") -> ToolAnswer:
 async def _admissions_payments_report_answer(
     settings: Settings,
     authorization: Optional[str],
+    payload: ChatRequest,
     lowered_message: str,
     language: str,
 ) -> ToolAnswer:
@@ -960,7 +967,12 @@ async def _admissions_payments_report_answer(
     if not _has_bearer_token(authorization):
         return _auth_required(tool_name, "laporan EOI dan pembayaran")
 
-    request = _report_request_from_message(lowered_message, language, REPORT_PREVIEW_LIMIT)
+    request = _report_request_from_message(
+        lowered_message,
+        language,
+        REPORT_PREVIEW_LIMIT,
+        payload,
+    )
     try:
         report = await build_admissions_payments_report(settings, authorization, request)
     except httpx.HTTPStatusError as exc:
@@ -1243,10 +1255,13 @@ def _report_request_from_message(
     lowered_message: str,
     language: str,
     limit: int,
+    payload: Optional[ChatRequest] = None,
 ) -> ReportRequest:
-    date_range = None if _asks_for_all_time(lowered_message) else _date_range_from_message(
-        lowered_message
-    )
+    date_range = None
+    if not _asks_for_all_time(lowered_message):
+        date_range = _date_range_from_message(lowered_message)
+        if date_range is None:
+            date_range = _date_range_from_recent_history(payload)
     schools = [code for code in DEFAULT_SCHOOL_CODES if code.casefold() in lowered_message]
     payment_status = _explicit_payment_status_from_message(lowered_message)
     return ReportRequest(
@@ -1257,6 +1272,22 @@ def _report_request_from_message(
         search="",
         limit=limit,
     )
+
+
+def _date_range_from_recent_history(payload: Optional[ChatRequest]) -> Optional[DateRange]:
+    if payload is None:
+        return None
+
+    for turn in reversed(payload.history[-8:]):
+        if turn.role != "user":
+            continue
+        lowered = turn.content.casefold()
+        if _asks_for_all_time(lowered):
+            return None
+        date_range = _date_range_from_message(lowered)
+        if date_range is not None:
+            return date_range
+    return None
 
 
 def _date_range_from_query(date_from: Optional[str], date_to: Optional[str]) -> Optional[DateRange]:
@@ -2325,6 +2356,32 @@ def _asks_for_admissions_payments_report(message: str) -> bool:
     return has_eoi and has_payment and has_report
 
 
+def _asks_for_contextual_report_export(message: str) -> bool:
+    export_terms = (
+        "report",
+        "laporan",
+        "export",
+        "download",
+        "excel",
+        "xlsx",
+        "pdf",
+        "word",
+        "docx",
+        "markdown",
+        "spreadsheet",
+        "table",
+        "tabel",
+        "convert",
+        "konversi",
+        "ubah",
+        "jadikan",
+        "bikin file",
+        "buat file",
+        "ke pdf",
+    )
+    return any(term in message for term in export_terms)
+
+
 def _asks_for_admission_lead_identity(message: str) -> bool:
     identity_terms = ("siapa", "nama", "email", "who", "name")
     lead_terms = (
@@ -2463,6 +2520,23 @@ def _asks_for_contextual_lead_child_identity(message: str) -> bool:
 def _history_has_tool_call(payload: ChatRequest, tool_name: str) -> bool:
     for turn in payload.history[-10:]:
         if any(tool.name == tool_name and tool.status == "ok" for tool in turn.tool_calls):
+            return True
+    return False
+
+
+def _history_has_reportable_tool_call(payload: ChatRequest) -> bool:
+    reportable_tools = {
+        "report.admissions_payments",
+        "admission.admin_leads_count",
+        "admission.admin_leads_list",
+        "admission.admin_lead_detail",
+        "admission.admin_lead_child_count",
+        "admission.admin_lead_students_list",
+        "payment.admin_review_count",
+        "payment.application_fee_quote",
+    }
+    for turn in payload.history[-10:]:
+        if any(tool.name in reportable_tools and tool.status == "ok" for tool in turn.tool_calls):
             return True
     return False
 
