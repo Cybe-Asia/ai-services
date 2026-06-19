@@ -292,6 +292,78 @@ def test_admin_chat_persists_server_side_thread_history(monkeypatch) -> None:
     ]
 
 
+def test_admin_chat_uses_structured_context_when_messages_are_pruned(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+            assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+            if params["limit"] == "1":
+                return {"data": {"total": 1}}
+            assert params["limit"] == "5"
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "latestPaymentStatus": "pending_verification",
+                        }
+                    ],
+                }
+            }
+
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+        assert params["limit"] == "5"
+        return {"data": {"total": 0, "rows": []}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    first = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={"message": "ada berapa eoi hari ini?", "actorRole": "admin"},
+    )
+    assert first.status_code == 200
+    conversation_id = first.json()["conversationId"]
+    context = thread_store._MEMORY_THREADS[conversation_id]["context"]
+    assert context["lastOkTool"] == "admission.admin_leads_count"
+    assert context["lastDateRange"]["label"] == "hari ini"
+
+    # Simulate an old/pruned thread where the rendered message history is gone
+    # but the compact routing context is still retained on the thread.
+    thread_store._MEMORY_THREADS[conversation_id]["messages"] = []
+
+    second = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={
+            "message": "convert ke pdf dong",
+            "actorRole": "admin",
+            "conversationId": conversation_id,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert "Laporan EOI + pembayaran sudah siap." in body["answer"]
+    assert "hari ini" in body["answer"]
+    assert body["toolCalls"][0] == {"name": "report.admissions_payments", "status": "ok"}
+
+
 def test_admin_chat_streams_tool_events_and_persists_thread(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
 
@@ -711,6 +783,49 @@ def test_owner_contextual_detail_followup_uses_leads_list_tool(monkeypatch) -> N
                 ],
             ),
             Settings(ai_provider_base_url="http://localhost:11434/v1"),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_list"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_contextual_detail_uses_structured_thread_context(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "5", "offset": "0"}
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "leadStatus": "verified",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="detailnya",
+                actor_role=ActorRole.admin,
+                metadata={
+                    "threadContext": {
+                        "lastOkTool": "admission.admin_leads_count",
+                        "recentOkTools": ["admission.admin_leads_count"],
+                    }
+                },
+            ),
+            Settings(),
             "Bearer test-token",
         )
     )

@@ -45,6 +45,9 @@ DOCX_DOCUMENT_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 )
 SCHOOL_TIME_ZONE = ZoneInfo("Asia/Jakarta")
+THREAD_CONTEXT_METADATA_KEY = "threadContext"
+THREAD_CONTEXT_VERSION = 1
+THREAD_CONTEXT_MAX_TOOLS = 10
 ID_MONTH_NAMES = {
     1: "Januari",
     2: "Februari",
@@ -162,6 +165,55 @@ class ReportFile:
     filename: str
     media_type: str
     body: bytes
+
+
+def build_thread_context(
+    payload: ChatRequest,
+    response: Any,
+    previous_context: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build compact routing memory for a server-side AI thread.
+
+    The context is deliberately non-authoritative: it only helps choose the
+    next safe tool. Admission/payment facts still come from owning services.
+    """
+
+    context = dict(previous_context) if isinstance(previous_context, dict) else {}
+    context["version"] = THREAD_CONTEXT_VERSION
+
+    ok_tools = [
+        tool.name
+        for tool in getattr(response, "tool_calls", [])
+        if isinstance(getattr(tool, "name", None), str) and getattr(tool, "status", None) == "ok"
+    ]
+    if ok_tools:
+        context["lastOkTool"] = ok_tools[-1]
+        context["recentOkTools"] = _dedupe_recent_tools(
+            _context_recent_ok_tools(context) + ok_tools,
+        )
+
+    lowered = payload.message.casefold()
+    if _asks_for_all_time(lowered):
+        context.pop("lastDateRange", None)
+    else:
+        date_range = _date_range_from_message(lowered)
+        if date_range is not None:
+            context["lastDateRange"] = _serialize_date_range(date_range)
+
+    payment_status = _explicit_payment_status_from_message(lowered)
+    if payment_status is not None:
+        context["lastPaymentStatus"] = payment_status
+
+    lead_query = _lead_search_query_from_message(lowered)
+    if not lead_query:
+        lead_query = _lead_search_query_from_assistant(str(getattr(response, "answer", "") or ""))
+    if lead_query:
+        context["lastLeadQuery"] = lead_query[:128]
+
+    if any(tool in _reportable_tool_names() for tool in ok_tools):
+        context["reportable"] = True
+
+    return _compact_thread_context(context)
 
 
 async def answer_from_school_tools(
@@ -1500,6 +1552,10 @@ def _date_range_from_recent_history(payload: Optional[ChatRequest]) -> Optional[
     if payload is None:
         return None
 
+    context_date_range = _date_range_from_thread_context(payload)
+    if context_date_range is not None:
+        return context_date_range
+
     for turn in reversed(payload.history[-8:]):
         if turn.role != "user":
             continue
@@ -2819,15 +2875,68 @@ def _asks_for_contextual_lead_child_identity(message: str) -> bool:
     return any(term == message.strip() or term in message for term in followup_terms)
 
 
-def _history_has_tool_call(payload: ChatRequest, tool_name: str) -> bool:
-    for turn in payload.history[-10:]:
-        if any(tool.name == tool_name and tool.status == "ok" for tool in turn.tool_calls):
-            return True
-    return False
+def _thread_context(payload: ChatRequest) -> dict[str, Any]:
+    context = payload.metadata.get(THREAD_CONTEXT_METADATA_KEY)
+    return _compact_thread_context(context) if isinstance(context, dict) else {}
 
 
-def _history_has_reportable_tool_call(payload: ChatRequest) -> bool:
-    reportable_tools = {
+def _compact_thread_context(value: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {"version": THREAD_CONTEXT_VERSION}
+    last_ok_tool = value.get("lastOkTool")
+    if isinstance(last_ok_tool, str) and last_ok_tool:
+        context["lastOkTool"] = last_ok_tool
+
+    recent_ok_tools = _dedupe_recent_tools(_context_recent_ok_tools(value))
+    if recent_ok_tools:
+        context["recentOkTools"] = recent_ok_tools
+
+    last_date_range = value.get("lastDateRange")
+    if isinstance(last_date_range, dict):
+        date_range = {
+            "start": last_date_range.get("start"),
+            "end": last_date_range.get("end"),
+            "label": last_date_range.get("label"),
+        }
+        if all(isinstance(item, str) and item for item in date_range.values()):
+            context["lastDateRange"] = date_range
+
+    last_payment_status = _normalize_payment_status(value.get("lastPaymentStatus"))
+    if last_payment_status is not None:
+        context["lastPaymentStatus"] = last_payment_status
+
+    last_lead_query = value.get("lastLeadQuery")
+    if isinstance(last_lead_query, str) and last_lead_query.strip():
+        context["lastLeadQuery"] = _clean_search_query(last_lead_query)[:128]
+
+    if value.get("reportable") is True:
+        context["reportable"] = True
+    return context
+
+
+def _context_recent_ok_tools(context: dict[str, Any]) -> list[str]:
+    tools: list[str] = []
+    recent = context.get("recentOkTools")
+    if isinstance(recent, list):
+        tools.extend(tool for tool in recent if isinstance(tool, str) and tool)
+    last_tool = context.get("lastOkTool")
+    if isinstance(last_tool, str) and last_tool:
+        tools.append(last_tool)
+    return _dedupe_recent_tools(tools)
+
+
+def _dedupe_recent_tools(tools: list[str]) -> list[str]:
+    result: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, str) or not tool:
+            continue
+        if tool in result:
+            result.remove(tool)
+        result.append(tool)
+    return result[-THREAD_CONTEXT_MAX_TOOLS:]
+
+
+def _reportable_tool_names() -> set[str]:
+    return {
         "report.admissions_payments",
         "admission.admin_leads_count",
         "admission.admin_leads_list",
@@ -2837,6 +2946,56 @@ def _history_has_reportable_tool_call(payload: ChatRequest) -> bool:
         "payment.admin_review_count",
         "payment.application_fee_quote",
     }
+
+
+def _serialize_date_range(date_range: DateRange) -> dict[str, str]:
+    return {
+        "start": date_range.start.isoformat(),
+        "end": date_range.end.isoformat(),
+        "label": date_range.label,
+    }
+
+
+def _date_range_from_thread_context(payload: ChatRequest) -> Optional[DateRange]:
+    raw = _thread_context(payload).get("lastDateRange")
+    if not isinstance(raw, dict):
+        return None
+    start = _parse_context_datetime(raw.get("start"))
+    end = _parse_context_datetime(raw.get("end"))
+    label = raw.get("label")
+    if start is None or end is None or not isinstance(label, str) or not label:
+        return None
+    return DateRange(start=start, end=end, label=label)
+
+
+def _parse_context_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=SCHOOL_TIME_ZONE)
+    return parsed
+
+
+def _history_has_tool_call(payload: ChatRequest, tool_name: str) -> bool:
+    if tool_name in _context_recent_ok_tools(_thread_context(payload)):
+        return True
+    for turn in payload.history[-10:]:
+        if any(tool.name == tool_name and tool.status == "ok" for tool in turn.tool_calls):
+            return True
+    return False
+
+
+def _history_has_reportable_tool_call(payload: ChatRequest) -> bool:
+    reportable_tools = _reportable_tool_names()
+    context = _thread_context(payload)
+    if context.get("reportable") is True:
+        return True
+    if any(tool in reportable_tools for tool in _context_recent_ok_tools(context)):
+        return True
     for turn in payload.history[-10:]:
         if any(tool.name in reportable_tools and tool.status == "ok" for tool in turn.tool_calls):
             return True
@@ -2844,6 +3003,10 @@ def _history_has_reportable_tool_call(payload: ChatRequest) -> bool:
 
 
 def _last_ok_tool_call(payload: ChatRequest) -> Optional[str]:
+    context = _thread_context(payload)
+    last_tool = context.get("lastOkTool")
+    if isinstance(last_tool, str) and last_tool:
+        return last_tool
     for turn in reversed(payload.history[-10:]):
         for tool in reversed(turn.tool_calls):
             if tool.status == "ok":
@@ -2865,6 +3028,11 @@ def _lead_search_query_from_context(payload: ChatRequest, lowered_message: str) 
     query = _lead_search_query_from_message(lowered_message)
     if query:
         return query
+
+    context = _thread_context(payload)
+    query = context.get("lastLeadQuery")
+    if isinstance(query, str) and query.strip():
+        return _clean_search_query(query)
 
     for turn in reversed(payload.history[-10:]):
         if turn.role == "user":

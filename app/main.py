@@ -30,6 +30,7 @@ from app.schemas import (
 from app.service_tools import (
     answer_from_school_tools,
     build_admissions_payments_report,
+    build_thread_context,
     render_admissions_payments_report,
     report_request_from_export_query,
 )
@@ -461,6 +462,10 @@ async def _with_server_thread_history(
     history = _history_from_thread_record(record)
     if not history:
         history = payload.history
+    metadata = dict(payload.metadata)
+    thread_context = _context_from_thread_record(record)
+    if thread_context:
+        metadata["threadContext"] = thread_context
 
     return (
         payload.model_copy(
@@ -468,6 +473,7 @@ async def _with_server_thread_history(
                 "actor_role": admin_context.actor_role,
                 "conversation_id": record["id"],
                 "history": history,
+                "metadata": metadata,
             }
         ),
         store,
@@ -483,6 +489,11 @@ async def _persist_thread_exchange(
     if thread_store is None or admin_context is None or response.conversation_id is None:
         return response
     try:
+        context = build_thread_context(
+            payload,
+            response,
+            _context_from_payload(payload),
+        )
         await thread_store.append_exchange(
             admin_context.owner_id,
             response.conversation_id,
@@ -491,6 +502,7 @@ async def _persist_thread_exchange(
             response.status,
             response.sources,
             response.tool_calls,
+            context,
         )
     except Exception:
         return response
@@ -522,6 +534,16 @@ def _history_from_thread_record(record: dict) -> list[ChatTurn]:
             )
         )
     return turns
+
+
+def _context_from_thread_record(record: dict) -> dict:
+    context = record.get("context")
+    return context if isinstance(context, dict) else {}
+
+
+def _context_from_payload(payload: ChatRequest) -> dict:
+    context = payload.metadata.get("threadContext")
+    return context if isinstance(context, dict) else {}
 
 
 async def _draft_answer(payload: ChatRequest, settings: Settings) -> str:

@@ -40,6 +40,7 @@ class ThreadStore:
             "createdAt": now,
             "updatedAt": now,
             "messages": [],
+            "context": {},
         }
         await self._save_record(record)
         await self._touch_owner_index(owner_id, thread_id, now)
@@ -83,6 +84,7 @@ class ThreadStore:
         assistant_status: str,
         sources: list[SourceRef],
         tool_calls: list[ToolCallRef],
+        context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         record = await self.get_record(owner_id, thread_id)
         now = _now_iso()
@@ -101,6 +103,8 @@ class ThreadStore:
             ]
         )
         record["messages"] = messages[-self._settings.ai_thread_max_messages :]
+        if context is not None:
+            record["context"] = _clean_context(context)
         if record.get("title") == "New chat":
             record["title"] = _title_from_message(user_content)
         record["updatedAt"] = now
@@ -278,6 +282,14 @@ def _message_from_record(record: dict[str, Any]) -> ThreadMessage:
 
 def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _clean_context(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        json.dumps(value, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return {}
+    return value
 
 
 def _clean_title(value: Optional[str]) -> str:
