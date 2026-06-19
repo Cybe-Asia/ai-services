@@ -1264,6 +1264,57 @@ def test_owner_underpaid_payment_count_uses_underpaid_status(monkeypatch) -> Non
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_operations_brief_uses_admission_payment_tools(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+            assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+            return {"data": {"total": 4}}
+
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert params["status"] == "pending_verification"
+        if "dateFrom" in params:
+            assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+            assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+            return {"data": {"total": 1}}
+        return {"data": {"total": 2}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="briefing owner hari ini",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Brief operasional sudah siap." in result.answer
+    assert "Periode: hari ini." in result.answer
+    assert "EOI baru: 4." in result.answer
+    assert "2 total; 1 masuk periode ini" in result.answer
+    assert "Review pembayaran pending" in result.answer
+    assert any(source.title == "Download PDF" for source in result.sources)
+    assert [(tool.name, tool.status) for tool in result.tool_calls] == [
+        ("ops.daily_brief", "ok"),
+        ("admission.admin_leads_count", "ok"),
+        ("payment.admin_review_count", "ok"),
+        ("report.admissions_payments", "ok"),
+    ]
+
+
 def test_owner_admission_price_uses_payment_fee_tool(monkeypatch) -> None:
     calls = []
 
@@ -1704,3 +1755,9 @@ def test_tool_intent_parser_accepts_fee_quote_alias() -> None:
     intent = service_tools._parse_tool_intent('{"intent":"admission_price_quote"}')
 
     assert intent.name == service_tools.INTENT_PAYMENT_APPLICATION_FEE
+
+
+def test_tool_intent_parser_accepts_operations_brief_alias() -> None:
+    intent = service_tools._parse_tool_intent('{"intent":"ops_brief"}')
+
+    assert intent.name == service_tools.INTENT_OPERATIONS_BRIEF

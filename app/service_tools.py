@@ -24,6 +24,7 @@ INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 INTENT_PAYMENT_APPLICATION_FEE = "payment_application_fee_quote"
 INTENT_ADMISSIONS_PAYMENTS_REPORT = "admissions_payments_report"
+INTENT_OPERATIONS_BRIEF = "operations_brief"
 INTENT_CURRENT_DATE = "current_date"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 DEFAULT_SCHOOL_CODES = ("IIHS", "IISS", "IIBS")
@@ -170,6 +171,10 @@ async def answer_from_school_tools(
 ) -> Optional[ToolAnswer]:
     lowered = payload.message.casefold()
     language = _answer_language(payload, lowered)
+    if payload.actor_role in {ActorRole.owner, ActorRole.admin} and _asks_for_operations_brief(
+        lowered
+    ):
+        return await _operations_brief_answer(settings, authorization, lowered, language)
     if _asks_for_current_date(lowered):
         return _current_date_answer(language)
 
@@ -183,6 +188,8 @@ async def answer_from_school_tools(
     if intent.name == INTENT_NONE:
         intent = await _classify_tool_intent(payload.message, settings)
 
+    if intent.name == INTENT_OPERATIONS_BRIEF:
+        return await _operations_brief_answer(settings, authorization, lowered, language)
     if intent.name == INTENT_ADMISSIONS_PAYMENTS_REPORT:
         return await _admissions_payments_report_answer(
             settings,
@@ -230,6 +237,8 @@ async def answer_from_school_tools(
 
 
 def _deterministic_tool_intent(message: str) -> ToolIntent:
+    if _asks_for_operations_brief(message):
+        return ToolIntent(INTENT_OPERATIONS_BRIEF)
     if _asks_for_current_date(message):
         return ToolIntent(INTENT_CURRENT_DATE)
     if _asks_for_admissions_payments_report(message):
@@ -311,6 +320,8 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "transfers, use payment_review_count. "
         "If user asks to report/export/download/show EOI together with payment data, "
         "use admissions_payments_report. "
+        "If user asks for daily brief, owner summary, operations summary, priorities, "
+        "or what to focus on today, use operations_brief. "
         "If user asks admission/application price, biaya pendaftaran, fee, tariff, or cost, "
         "use payment_application_fee_quote. Otherwise use none. "
         'Example: "berapa calon keluarga masuk?" => {"intent":"admission_eoi_count"}. '
@@ -320,6 +331,7 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         '{"intent":"payment_review_count","paymentStatus":"pending_verification"}. '
         'Example: "export EOI and payment this month" => '
         '{"intent":"admissions_payments_report"}. '
+        'Example: "briefing owner hari ini" => {"intent":"operations_brief"}. '
         'Example: "berapa harga admissions?" => {"intent":"payment_application_fee_quote"}.'
     )
 
@@ -375,6 +387,8 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
         return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
     if intent == INTENT_ADMISSIONS_PAYMENTS_REPORT:
         return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
+    if intent == INTENT_OPERATIONS_BRIEF:
+        return ToolIntent(INTENT_OPERATIONS_BRIEF)
     if intent == INTENT_CURRENT_DATE:
         return ToolIntent(INTENT_CURRENT_DATE)
     return ToolIntent(INTENT_NONE)
@@ -421,6 +435,12 @@ def _normalize_intent(value: Any) -> str:
         "admissions_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
         "eoi_payment_report": INTENT_ADMISSIONS_PAYMENTS_REPORT,
         "report_admissions_payments": INTENT_ADMISSIONS_PAYMENTS_REPORT,
+        INTENT_OPERATIONS_BRIEF: INTENT_OPERATIONS_BRIEF,
+        "daily_brief": INTENT_OPERATIONS_BRIEF,
+        "daily_briefing": INTENT_OPERATIONS_BRIEF,
+        "owner_summary": INTENT_OPERATIONS_BRIEF,
+        "operations_summary": INTENT_OPERATIONS_BRIEF,
+        "ops_brief": INTENT_OPERATIONS_BRIEF,
         INTENT_CURRENT_DATE: INTENT_CURRENT_DATE,
         "today": INTENT_CURRENT_DATE,
         "current_day": INTENT_CURRENT_DATE,
@@ -938,6 +958,206 @@ async def _payment_application_fee_quote(
         sources=[SourceRef(kind="service", title="payment-service fee structures", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
+
+
+async def _operations_brief_answer(
+    settings: Settings,
+    authorization: Optional[str],
+    lowered_message: str,
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "ops.daily_brief"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "brief operasional")
+
+    date_range = _operations_brief_date_range(lowered_message)
+    admission_url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
+    payment_url = _join_url(settings.payment_service_url, "/api/v1/payments/admin/reviews")
+
+    try:
+        eoi_period_total = await _count_service_rows(
+            admission_url,
+            authorization,
+            _lead_list_params(limit=1, offset=0, date_range=date_range),
+        )
+        payment_pending_total = await _count_service_rows(
+            payment_url,
+            authorization,
+            _payment_review_params(
+                status="pending_verification",
+                limit=1,
+                offset=0,
+            ),
+        )
+        payment_period_pending_total = (
+            payment_pending_total
+            if date_range is None
+            else await _count_service_rows(
+                payment_url,
+                authorization,
+                _payment_review_params(
+                    status="pending_verification",
+                    limit=1,
+                    offset=0,
+                    date_range=date_range,
+                ),
+            )
+        )
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa membuat brief operasional dari admission/payment service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa membuat brief operasional dari admission/payment service.",
+        )
+
+    report_request = ReportRequest(
+        date_range=date_range,
+        language=language,
+        limit=REPORT_EXPORT_LIMIT,
+    )
+    answer = _format_operations_brief_answer(
+        date_range=date_range,
+        language=language,
+        eoi_period_total=eoi_period_total,
+        payment_pending_total=payment_pending_total,
+        payment_period_pending_total=payment_period_pending_total,
+    )
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service admin leads", reference=None),
+            SourceRef(kind="service", title="payment-service admin reviews", reference=None),
+            *_report_export_sources(report_request),
+        ],
+        tool_calls=[
+            ToolCallRef(name=tool_name, status="ok"),
+            ToolCallRef(name="admission.admin_leads_count", status="ok"),
+            ToolCallRef(name="payment.admin_review_count", status="ok"),
+            ToolCallRef(name="report.admissions_payments", status="ok"),
+        ],
+    )
+
+
+async def _count_service_rows(
+    url: str,
+    authorization: Optional[str],
+    params: dict[str, str],
+) -> int:
+    return _extract_total(await _get_json(url, authorization, params))
+
+
+def _operations_brief_date_range(message: str) -> Optional[DateRange]:
+    if _asks_for_all_time(message):
+        return None
+    date_range = _date_range_from_message(message)
+    if date_range is not None:
+        return date_range
+    today = _now_jakarta().date()
+    return _single_day_range(today, "hari ini")
+
+
+def _format_operations_brief_answer(
+    *,
+    date_range: Optional[DateRange],
+    language: str,
+    eoi_period_total: int,
+    payment_pending_total: int,
+    payment_period_pending_total: int,
+) -> str:
+    period = (
+        "all time"
+        if date_range is None and language == "en"
+        else "semua waktu"
+        if date_range is None
+        else _format_date_range_label_en(date_range)
+        if language == "en"
+        else date_range.label
+    )
+    actions = _operations_brief_actions(
+        eoi_period_total,
+        payment_pending_total,
+        payment_period_pending_total,
+        language,
+    )
+
+    if language == "en":
+        return "\n".join(
+            [
+                "Operations briefing is ready.",
+                f"Period: {period}.",
+                f"New EOIs: {eoi_period_total}.",
+                (
+                    "Payments pending verification: "
+                    f"{payment_pending_total} total; {payment_period_pending_total} "
+                    f"received in this period."
+                ),
+                "",
+                "Recommended focus:",
+                *[f"- {action}" for action in actions],
+                "",
+                "Export links are available as Excel, PDF, Word, and Markdown.",
+            ]
+        )
+
+    return "\n".join(
+        [
+            "Brief operasional sudah siap.",
+            f"Periode: {period}.",
+            f"EOI baru: {eoi_period_total}.",
+            (
+                "Pembayaran pending verifikasi: "
+                f"{payment_pending_total} total; {payment_period_pending_total} masuk periode ini."
+            ),
+            "",
+            "Prioritas yang disarankan:",
+            *[f"- {action}" for action in actions],
+            "",
+            "Link export tersedia sebagai Excel, PDF, Word, dan Markdown.",
+        ]
+    )
+
+
+def _operations_brief_actions(
+    eoi_period_total: int,
+    payment_pending_total: int,
+    payment_period_pending_total: int,
+    language: str,
+) -> list[str]:
+    if language == "en":
+        actions = []
+        if payment_pending_total > 0:
+            actions.append("Review pending payments first so admissions can keep moving.")
+        else:
+            actions.append("Payment review queue is clear; keep monitoring new uploads.")
+        if eoi_period_total > 0:
+            actions.append("Follow up new EOIs while parent intent is still fresh.")
+        else:
+            actions.append("No new EOIs in this period; check campaign source and follow-up lists.")
+        if payment_period_pending_total > 0:
+            actions.append("Match payment proofs received in this period against applications.")
+        return actions
+
+    actions = []
+    if payment_pending_total > 0:
+        actions.append("Review pembayaran pending dulu supaya admissions tidak tertahan.")
+    else:
+        actions.append("Antrian review pembayaran kosong; tetap pantau upload bukti baru.")
+    if eoi_period_total > 0:
+        actions.append("Follow up EOI baru saat intent parent masih hangat.")
+    else:
+        actions.append(
+            "Belum ada EOI baru di periode ini; cek sumber campaign dan daftar follow-up."
+        )
+    if payment_period_pending_total > 0:
+        actions.append("Cocokkan bukti pembayaran yang masuk periode ini dengan aplikasi.")
+    return actions
 
 
 def _current_date_answer(language: str = "id") -> ToolAnswer:
@@ -2354,6 +2574,47 @@ def _asks_for_admissions_payments_report(message: str) -> bool:
     has_payment = any(term in message for term in payment_terms)
     has_report = any(term in message for term in report_terms)
     return has_eoi and has_payment and has_report
+
+
+def _asks_for_operations_brief(message: str) -> bool:
+    brief_terms = (
+        "brief",
+        "briefing",
+        "ringkasan",
+        "rangkuman",
+        "summary",
+        "snapshot",
+        "insight",
+        "prioritas",
+        "priority",
+        "fokus",
+        "focus",
+        "apa yang harus",
+        "what should",
+        "owner update",
+        "update owner",
+        "operasional",
+        "operations",
+        "ops",
+    )
+    operations_terms = (
+        "hari ini",
+        "today",
+        "owner",
+        "admission",
+        "admissions",
+        "eoi",
+        "lead",
+        "payment",
+        "pembayaran",
+        "finance",
+        "operasional",
+        "operations",
+        "ops",
+    )
+    return any(term in message for term in brief_terms) and any(
+        term in message for term in operations_terms
+    )
 
 
 def _asks_for_contextual_report_export(message: str) -> bool:
