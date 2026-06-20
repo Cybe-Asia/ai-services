@@ -23,6 +23,7 @@ from app.schemas import (
     HealthResponse,
     MetadataResponse,
     SourceRef,
+    ThreadAuditResponse,
     ThreadListResponse,
     ThreadResponse,
     ToolCallRef,
@@ -156,6 +157,31 @@ async def get_thread(
             detail="AI thread history unavailable",
         ) from exc
     return ThreadResponse(thread=summary, messages=messages)
+
+
+@app.get("/api/ai/v1/threads/{thread_id}/audit", response_model=ThreadAuditResponse)
+async def get_thread_audit(
+    thread_id: str,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> ThreadAuditResponse:
+    admin_context = await resolve_admin_context(settings, authorization)
+    try:
+        events = await ThreadStore(settings).get_audit_events(
+            admin_context.owner_id,
+            thread_id,
+        )
+    except ThreadNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Thread not found",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI thread audit unavailable",
+        ) from exc
+    return ThreadAuditResponse(events=events)
 
 
 @app.delete("/api/ai/v1/threads/{thread_id}", response_model=DeleteThreadResponse)

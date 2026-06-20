@@ -88,6 +88,20 @@ class ThreadResponse(CamelModel):
     messages: list[ThreadMessage] = Field(default_factory=list)
 
 
+class AuditEvent(CamelModel):
+    id: str
+    created_at: str
+    actor_role: str
+    tool: str
+    status: str
+    date_range_label: Optional[str] = None
+    source_kinds: list[str] = Field(default_factory=list, max_length=8)
+
+
+class ThreadAuditResponse(CamelModel):
+    events: list[AuditEvent] = Field(default_factory=list)
+
+
 class DeleteThreadResponse(CamelModel):
     status: str = "ok"
 

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Optional
 from urllib.parse import urlencode
+from uuid import uuid4
 from xml.sax.saxutils import escape as xml_escape
 from zipfile import ZIP_DEFLATED, ZipFile
 from zoneinfo import ZoneInfo
@@ -48,6 +49,7 @@ SCHOOL_TIME_ZONE = ZoneInfo("Asia/Jakarta")
 THREAD_CONTEXT_METADATA_KEY = "threadContext"
 THREAD_CONTEXT_VERSION = 1
 THREAD_CONTEXT_MAX_TOOLS = 10
+THREAD_CONTEXT_MAX_AUDIT_EVENTS = 50
 ID_MONTH_NAMES = {
     1: "Januari",
     2: "Februari",
@@ -193,6 +195,7 @@ def build_thread_context(
         )
 
     lowered = payload.message.casefold()
+    date_range = None
     if _asks_for_all_time(lowered):
         context.pop("lastDateRange", None)
     else:
@@ -212,6 +215,19 @@ def build_thread_context(
 
     if any(tool in _reportable_tool_names() for tool in ok_tools):
         context["reportable"] = True
+
+    audit_date_range = date_range
+    if (
+        audit_date_range is None
+        and not _asks_for_all_time(lowered)
+        and "report.admissions_payments" in ok_tools
+    ):
+        audit_date_range = _date_range_from_recent_history(payload)
+    audit_events = _audit_events_for_response(payload, response, audit_date_range)
+    if audit_events:
+        context["auditEvents"] = _compact_audit_events(
+            _context_audit_events(context) + audit_events,
+        )
 
     return _compact_thread_context(context)
 
@@ -317,6 +333,7 @@ def _contextual_tool_intent(
     lowered_message: str,
     date_range: Optional[DateRange],
 ) -> ToolIntent:
+    context = _thread_context(payload)
     if date_range is not None and _asks_for_contextual_period_followup(lowered_message):
         last_tool = _last_ok_tool_call(payload)
         if last_tool == "admission.admin_leads_list":
@@ -340,6 +357,8 @@ def _contextual_tool_intent(
     ):
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
     if _asks_for_contextual_lead_detail(lowered_message):
+        if isinstance(context.get("lastLeadQuery"), str) and context["lastLeadQuery"].strip():
+            return ToolIntent(INTENT_ADMISSION_LEAD_DETAIL)
         if (
             _history_has_tool_call(payload, "admission.admin_leads_list")
             or _history_has_tool_call(payload, "admission.admin_lead_child_count")
@@ -567,6 +586,7 @@ async def _admission_eoi_count(
         if language == "en"
         else f"Ada {total} EOI terdaftar{scope} di admission-service."
     )
+    answer = _with_next_actions(answer, language, _next_actions("eoi_count", language))
     return ToolAnswer(
         answer=answer,
         sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
@@ -638,6 +658,7 @@ async def _admission_leads_list(
             lines.append(f"{index}. {name}{suffix}")
         answer = "\n".join(lines)
 
+    answer = _with_next_actions(answer, language, _next_actions("eoi_list", language))
     return ToolAnswer(
         answer=answer,
         sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
@@ -701,6 +722,7 @@ async def _admission_lead_detail(
         )
 
     answer = _format_lead_detail_answer(row, detail, lead, students, total, language)
+    answer = _with_next_actions(answer, language, _next_actions("eoi_detail", language))
     return ToolAnswer(
         answer=answer,
         sources=[
@@ -782,6 +804,7 @@ async def _admission_lead_child_count(
                 else f"{name} mendaftarkan {count} anak di aplikasi{detail}."
             )
 
+    answer = _with_next_actions(answer, language, _next_actions("eoi_children", language))
     return ToolAnswer(
         answer=answer,
         sources=[
@@ -860,16 +883,33 @@ async def _admission_lead_students_list(
             else f"{parent_name} punya {len(students)} anak di aplikasi:"
         ]
         for index, student in enumerate(students[:5], start=1):
-            name = _clean_text(student.get("fullName")) or (
+            name = _first_student_text(student, "fullName", "name", "studentName", "childName") or (
                 "Name unavailable" if language == "en" else "Nama belum tersedia"
             )
-            date_of_birth = _clean_text(student.get("dateOfBirth"))
-            age = _string_value(student.get("ageAtApplication"))
-            current_school = _clean_text(student.get("currentSchool"))
-            target_grade = _clean_text(student.get("targetGradeLevel"))
-            target_school = _clean_text(student.get("targetSchool"))
-            application_mode = _clean_text(student.get("applicationMode"))
-            student_status = _clean_text(student.get("applicantStatus"))
+            date_of_birth = _first_student_text(
+                student,
+                "dateOfBirth",
+                "date_of_birth",
+                "dob",
+                "birthDate",
+            )
+            age = _first_student_text(student, "ageAtApplication", "age_at_application", "age")
+            current_school = _first_student_text(
+                student,
+                "currentSchool",
+                "current_school",
+                "previousSchool",
+            )
+            target_grade = _first_student_text(
+                student,
+                "targetGradeLevel",
+                "target_grade_level",
+                "grade",
+                "gradeLevel",
+            )
+            target_school = _first_student_text(student, "targetSchool", "target_school", "school")
+            application_mode = _first_student_text(student, "applicationMode", "application_mode")
+            student_status = _first_student_text(student, "applicantStatus", "status")
             details = []
             if date_of_birth:
                 details.append(
@@ -899,6 +939,7 @@ async def _admission_lead_students_list(
             lines.append(f"{index}. {name}{suffix}")
         answer = "\n".join(lines)
 
+    answer = _with_next_actions(answer, language, _next_actions("eoi_children", language))
     return ToolAnswer(
         answer=answer,
         sources=[
@@ -955,6 +996,7 @@ async def _payment_review_count(
         if language == "en"
         else f"Ada {total} pembayaran {label}{scope} di payment-service."
     )
+    answer = _with_next_actions(answer, language, _next_actions("payment_count", language))
     return ToolAnswer(
         answer=answer,
         sources=[SourceRef(kind="service", title="payment-service admin reviews", reference=None)],
@@ -1007,6 +1049,7 @@ async def _payment_application_fee_quote(
         if language == "en"
         else f"{fee_label.capitalize()} saat ini: {', '.join(parts)}."
     )
+    answer = _with_next_actions(answer, language, _next_actions("fee_quote", language))
     return ToolAnswer(
         answer=answer,
         sources=[SourceRef(kind="service", title="payment-service fee structures", reference=None)],
@@ -1083,6 +1126,7 @@ async def _operations_brief_answer(
         payment_pending_total=payment_pending_total,
         payment_period_pending_total=payment_period_pending_total,
     )
+    answer = _with_next_actions(answer, language, _next_actions("ops_brief", language))
     return ToolAnswer(
         answer=answer,
         sources=[
@@ -1458,32 +1502,78 @@ def _format_report_preview_answer(report: AdmissionsPaymentsReport) -> str:
             if language == "en"
             else f"Catatan: export dibatasi {REPORT_EXPORT_LIMIT} baris per tabel."
         )
-    return "\n".join(lines)
+    return _with_next_actions(
+        "\n".join(lines),
+        language,
+        _next_actions("report", language),
+    )
 
 
 def _preview_lead_lines(rows: list[dict[str, Any]], language: str) -> list[str]:
     title = "Latest EOIs:" if language == "en" else "EOI terbaru:"
-    lines = [title]
+    lines = [
+        title,
+        "| # | Parent | Email | School | Lead status | Payment |",
+        "|---|---|---|---|---|---|",
+    ]
     for index, row in enumerate(rows[:REPORT_PREVIEW_LIMIT], start=1):
         name = _clean_text(row.get("parentName")) or (
             "Name unavailable" if language == "en" else "Nama belum tersedia"
         )
+        email = _clean_text(row.get("email")) or "-"
         school = _clean_text(row.get("school"))
+        lead_status = _clean_text(row.get("leadStatus")) or "-"
         payment_status = _clean_text(row.get("latestPaymentStatus")) or "-"
-        lines.append(f"{index}. {name} ({school or '-'}; payment: {payment_status})")
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    str(index),
+                    name,
+                    email,
+                    school or "-",
+                    lead_status,
+                    payment_status,
+                )
+            )
+            + " |"
+        )
     return lines
 
 
 def _preview_payment_lines(rows: list[dict[str, Any]], language: str) -> list[str]:
     title = "Payment review queue:" if language == "en" else "Antrian review pembayaran:"
-    lines = [title]
+    lines = [
+        title,
+        "| # | Parent | Email | School | Type | Status | Amount |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for index, row in enumerate(rows[:REPORT_PREVIEW_LIMIT], start=1):
         name = _clean_text(row.get("parentName")) or (
             "Name unavailable" if language == "en" else "Nama belum tersedia"
         )
+        email = _clean_text(row.get("parentEmail")) or "-"
+        school = _clean_text(row.get("school")) or "-"
+        payment_type = _clean_text(row.get("paymentType")) or "-"
         amount = _format_money(row.get("amount"), row.get("currency"))
         status = _clean_text(row.get("status")) or "-"
-        lines.append(f"{index}. {name} ({status}; {amount})")
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    str(index),
+                    name,
+                    email,
+                    school,
+                    payment_type,
+                    status,
+                    amount,
+                )
+            )
+            + " |"
+        )
     return lines
 
 
@@ -2190,15 +2280,36 @@ def _format_lead_detail_answer(
         "Name unavailable" if language == "en" else "Nama belum tersedia"
     )
     email = _first_text(lead, row, "email")
-    mobile = _first_text(lead, row, "mobile", "whatsapp")
-    school = _first_text(lead, row, "target_school_preference", "school")
+    mobile = _first_text(lead, row, "mobile", "phone", "phoneNumber", "whatsapp")
+    school = _first_text(
+        lead,
+        row,
+        "target_school_preference",
+        "targetSchoolPreference",
+        "targetSchool",
+        "school",
+    )
     lead_status = _first_text(lead, row, "status", "leadStatus")
-    setup_step = _clean_text(lead.get("setupStep"))
-    application_id = _clean_text(detail.get("applicationId"))
-    application_status = _clean_text(detail.get("applicationStatus"))
-    payment_status = _clean_text(detail.get("latestPaymentStatus"))
-    payment_type = _clean_text(detail.get("latestPaymentType"))
-    payment_amount = detail.get("latestPaymentAmount")
+    setup_step = _first_text(lead, detail, "setupStep", "setup_step")
+    submitted_at = _first_text(
+        detail,
+        row,
+        "submittedAt",
+        "submitted_at",
+        "createdAt",
+        "created_at",
+    )
+    application_id = _first_text(detail, row, "applicationId", "application_id")
+    application_status = _first_text(detail, row, "applicationStatus", "application_status")
+    applicant_count = _safe_int(detail.get("applicantCount")) or _safe_int(
+        row.get("applicantCount")
+    )
+    payment_status = _first_text(detail, row, "latestPaymentStatus", "paymentStatus")
+    payment_type = _first_text(detail, row, "latestPaymentType", "paymentType")
+    payment_amount = detail.get("latestPaymentAmount", row.get("latestPaymentAmount"))
+    reference_code = _first_text(lead, row, "reference_code", "referenceCode")
+    reference_owner = _first_text(lead, row, "reference_owner_name", "referenceOwnerName")
+    campaign = _first_text(lead, row, "campaign_name", "campaignName", "utmCampaign")
 
     if language == "en":
         lines = [f"Full EOI detail for {name}:"]
@@ -2206,13 +2317,19 @@ def _format_lead_detail_answer(
         _append_labeled(lines, "Mobile/WhatsApp", mobile)
         _append_labeled(lines, "Target school", school)
         _append_labeled(lines, "Lead status", lead_status)
+        _append_labeled(lines, "Submitted", submitted_at)
         _append_labeled(lines, "Setup step", setup_step)
         _append_labeled(lines, "Application", _status_with_id(application_status, application_id))
+        if applicant_count > 0:
+            lines.append(f"- Registered children: {applicant_count}")
         _append_labeled(
             lines,
             "Latest payment",
             _payment_summary(payment_status, payment_type, payment_amount),
         )
+        _append_labeled(lines, "Referral code", reference_code)
+        _append_labeled(lines, "Referral owner", reference_owner)
+        _append_labeled(lines, "Campaign", campaign)
         if total > 1:
             lines.append(f"Note: {total} matching EOIs found; showing the top result.")
         lines.extend(_format_student_detail_lines(students, language))
@@ -2224,13 +2341,19 @@ def _format_lead_detail_answer(
         _append_labeled(lines, "Mobile/WhatsApp", mobile)
         _append_labeled(lines, "Sekolah tujuan", school)
         _append_labeled(lines, "Status lead", lead_status)
+        _append_labeled(lines, "Waktu daftar", submitted_at)
         _append_labeled(lines, "Setup step", setup_step)
         _append_labeled(lines, "Aplikasi", _status_with_id(application_status, application_id))
+        if applicant_count > 0:
+            lines.append(f"- Jumlah anak terdaftar: {applicant_count}")
         _append_labeled(
             lines,
             "Payment terakhir",
             _payment_summary(payment_status, payment_type, payment_amount),
         )
+        _append_labeled(lines, "Kode referral", reference_code)
+        _append_labeled(lines, "Pemilik referral", reference_owner)
+        _append_labeled(lines, "Campaign", campaign)
         if total > 1:
             lines.append(f"Catatan: ada {total} EOI cocok; saya tampilkan hasil teratas.")
         lines.extend(_format_student_detail_lines(students, language))
@@ -2248,7 +2371,7 @@ def _format_student_detail_lines(students: list[dict[str, Any]], language: str) 
 
     lines = ["Children:"] if language == "en" else ["Anak:"]
     for index, student in enumerate(students[:5], start=1):
-        name = _clean_text(student.get("fullName")) or (
+        name = _first_student_text(student, "fullName", "name", "studentName", "childName") or (
             "Name unavailable" if language == "en" else "Nama belum tersedia"
         )
         fields = []
@@ -2274,18 +2397,18 @@ def _format_student_detail_lines(students: list[dict[str, Any]], language: str) 
 
 def _append_detail(fields: list[str], label: str, student: dict[str, Any]) -> None:
     key_aliases = {
-        "date of birth": ("dateOfBirth",),
-        "tanggal lahir": ("dateOfBirth",),
-        "age at application": ("ageAtApplication",),
-        "usia saat daftar": ("ageAtApplication",),
-        "current school": ("currentSchool",),
-        "sekolah asal": ("currentSchool",),
-        "target grade": ("targetGradeLevel",),
-        "grade tujuan": ("targetGradeLevel",),
-        "target school": ("targetSchool",),
-        "sekolah tujuan": ("targetSchool",),
+        "date of birth": ("dateOfBirth", "date_of_birth", "dob", "birthDate"),
+        "tanggal lahir": ("dateOfBirth", "date_of_birth", "dob", "birthDate"),
+        "age at application": ("ageAtApplication", "age_at_application", "age"),
+        "usia saat daftar": ("ageAtApplication", "age_at_application", "age"),
+        "current school": ("currentSchool", "current_school", "previousSchool"),
+        "sekolah asal": ("currentSchool", "current_school", "previousSchool"),
+        "target grade": ("targetGradeLevel", "target_grade_level", "grade", "gradeLevel"),
+        "grade tujuan": ("targetGradeLevel", "target_grade_level", "grade", "gradeLevel"),
+        "target school": ("targetSchool", "target_school", "school"),
+        "sekolah tujuan": ("targetSchool", "target_school", "school"),
         "mode": ("applicationMode",),
-        "status": ("applicantStatus",),
+        "status": ("applicantStatus", "status"),
     }
     for key in key_aliases[label]:
         raw_value = student.get(key)
@@ -2295,6 +2418,17 @@ def _append_detail(fields: list[str], label: str, student: dict[str, Any]) -> No
         if value:
             fields.append(f"{label}: {value}")
             return
+
+
+def _first_student_text(student: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        raw_value = student.get(key)
+        value = _clean_text(raw_value)
+        if not value and isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+            value = str(raw_value)
+        if value:
+            return value
+    return ""
 
 
 def _format_prospective_child_lines(lead: dict[str, Any], language: str) -> list[str]:
@@ -2367,15 +2501,33 @@ def _date_range_from_message(message: str) -> Optional[DateRange]:
     now = _now_jakarta()
     today = now.date()
 
-    relative_day = _relative_day_range_from_message(message, today)
-    if relative_day is not None:
-        return relative_day
+    relative_range = _relative_range_from_message(message, today)
+    if relative_range is not None:
+        return relative_range
 
     if any(term in message for term in ("hari ini", "today")):
         return _single_day_range(today, "hari ini")
     if any(term in message for term in ("kemarin", "yesterday")):
         day = today - timedelta(days=1)
         return _single_day_range(day, f"kemarin ({_format_day_label(day)})")
+    if any(term in message for term in ("minggu lalu", "last week")):
+        start = today - timedelta(days=today.weekday() + 7)
+        end = start + timedelta(days=7)
+        end_label = _format_day_label(end - timedelta(days=1))
+        return _range_from_dates(
+            start,
+            end,
+            f"minggu lalu ({_format_day_label(start)} - {end_label})",
+        )
+    if any(term in message for term in ("minggu ini", "this week")):
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=7)
+        end_label = _format_day_label(end - timedelta(days=1))
+        return _range_from_dates(
+            start,
+            end,
+            f"minggu ini ({_format_day_label(start)} - {end_label})",
+        )
     if any(term in message for term in ("bulan lalu", "last month")):
         first_this_month = today.replace(day=1)
         last_month_end = first_this_month - timedelta(days=1)
@@ -2401,6 +2553,40 @@ def _date_range_from_message(message: str) -> Optional[DateRange]:
     return None
 
 
+def _relative_range_from_message(message: str, today) -> Optional[DateRange]:
+    for parser in (
+        _rolling_day_range_from_message,
+        _relative_day_range_from_message,
+        _relative_week_range_from_message,
+        _relative_month_range_from_message,
+    ):
+        date_range = parser(message, today)
+        if date_range is not None:
+            return date_range
+    return None
+
+
+def _rolling_day_range_from_message(message: str, today) -> Optional[DateRange]:
+    match = re.search(
+        r"\b(?:(?:last|past|previous)\s+(?P<count_en>\d{1,3})\s+days|"
+        r"(?P<count_id>\d{1,3})\s*hari\s+terakhir)\b",
+        message,
+    )
+    if not match:
+        return None
+
+    days = int(match.group("count_en") or match.group("count_id"))
+    if days <= 0 or days > 366:
+        return None
+
+    start = today - timedelta(days=days - 1)
+    return _range_from_dates(
+        start,
+        today + timedelta(days=1),
+        f"{days} hari terakhir ({_format_day_label(start)} - {_format_day_label(today)})",
+    )
+
+
 def _relative_day_range_from_message(message: str, today) -> Optional[DateRange]:
     match = re.search(
         r"\b(?P<count>\d{1,4})\s*(?:hari|day|days)\s*(?:yang\s+)?(?:lalu|ago)\b",
@@ -2415,6 +2601,52 @@ def _relative_day_range_from_message(message: str, today) -> Optional[DateRange]
 
     day = today - timedelta(days=days)
     return _single_day_range(day, f"{days} hari lalu ({_format_day_label(day)})")
+
+
+def _relative_week_range_from_message(message: str, today) -> Optional[DateRange]:
+    match = re.search(
+        r"\b(?P<count>\d{1,3})\s*(?:minggu|week|weeks)\s*(?:yang\s+)?(?:lalu|ago)\b",
+        message,
+    )
+    if not match:
+        return None
+
+    weeks = int(match.group("count"))
+    if weeks <= 0 or weeks > 104:
+        return None
+
+    target = today - timedelta(days=weeks * 7)
+    start = target - timedelta(days=target.weekday())
+    end = start + timedelta(days=7)
+    end_label = _format_day_label(end - timedelta(days=1))
+    return _range_from_dates(
+        start,
+        end,
+        f"{weeks} minggu lalu ({_format_day_label(start)} - {end_label})",
+    )
+
+
+def _relative_month_range_from_message(message: str, today) -> Optional[DateRange]:
+    match = re.search(
+        r"\b(?:(?P<count_id>\d{1,2})\s*bulan\s+(?:yang\s+)?lalu|"
+        r"(?P<count_en>\d{1,2})\s*months?\s+ago)\b",
+        message,
+    )
+    if not match:
+        return None
+
+    months = int(match.group("count_id") or match.group("count_en"))
+    if months <= 0 or months > 24:
+        return None
+
+    first_this_month = today.replace(day=1)
+    start = _add_months(first_this_month, -months)
+    end = _add_month(start)
+    return _range_from_dates(
+        start,
+        end,
+        f"{months} bulan lalu ({ID_MONTH_NAMES[start.month]} {start.year})",
+    )
 
 
 def _specific_date_from_message(message: str, default_year: int):
@@ -2494,6 +2726,12 @@ def _add_month(value):
     if value.month == 12:
         return value.replace(year=value.year + 1, month=1, day=1)
     return value.replace(month=value.month + 1, day=1)
+
+
+def _add_months(value, months: int):
+    month_index = value.year * 12 + (value.month - 1) + months
+    year, month_zero = divmod(month_index, 12)
+    return value.replace(year=year, month=month_zero + 1, day=1)
 
 
 def _format_day_label(day) -> str:
@@ -2839,25 +3077,7 @@ def _asks_for_contextual_lead_detail(message: str) -> bool:
 
 
 def _asks_for_contextual_period_followup(message: str) -> bool:
-    if re.search(
-        r"\b\d{1,4}\s*(?:hari|day|days)\s*(?:yang\s+)?(?:lalu|ago)\b",
-        message,
-    ):
-        return True
-
-    period_terms = (
-        "hari ini",
-        "today",
-        "kemarin",
-        "yesterday",
-        "bulan lalu",
-        "last month",
-        "bulan ini",
-        "this month",
-    )
-    if any(term in message for term in period_terms):
-        return True
-    return _specific_date_from_message(message, _now_jakarta().year) is not None
+    return _date_range_from_message(message) is not None
 
 
 def _asks_for_contextual_lead_child_identity(message: str) -> bool:
@@ -2910,6 +3130,10 @@ def _compact_thread_context(value: dict[str, Any]) -> dict[str, Any]:
 
     if value.get("reportable") is True:
         context["reportable"] = True
+
+    audit_events = _compact_audit_events(_context_audit_events(value))
+    if audit_events:
+        context["auditEvents"] = audit_events
     return context
 
 
@@ -2922,6 +3146,33 @@ def _context_recent_ok_tools(context: dict[str, Any]) -> list[str]:
     if isinstance(last_tool, str) and last_tool:
         tools.append(last_tool)
     return _dedupe_recent_tools(tools)
+
+
+def _context_audit_events(context: dict[str, Any]) -> list[dict[str, Any]]:
+    events = context.get("auditEvents")
+    if not isinstance(events, list):
+        return []
+    return [event for event in events if isinstance(event, dict)]
+
+
+def _compact_audit_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for event in events:
+        clean_event: dict[str, Any] = {}
+        for key in ("id", "createdAt", "actorRole", "tool", "status", "dateRangeLabel"):
+            value = event.get(key)
+            if isinstance(value, str) and value:
+                clean_event[key] = value[:160]
+        source_kinds = event.get("sourceKinds")
+        if isinstance(source_kinds, list):
+            clean_event["sourceKinds"] = [
+                value[:64]
+                for value in source_kinds
+                if isinstance(value, str) and value
+            ][:8]
+        if all(key in clean_event for key in ("id", "createdAt", "actorRole", "tool", "status")):
+            compacted.append(clean_event)
+    return compacted[-THREAD_CONTEXT_MAX_AUDIT_EVENTS:]
 
 
 def _dedupe_recent_tools(tools: list[str]) -> list[str]:
@@ -2946,6 +3197,48 @@ def _reportable_tool_names() -> set[str]:
         "payment.admin_review_count",
         "payment.application_fee_quote",
     }
+
+
+def _auditable_tool_names() -> set[str]:
+    return _reportable_tool_names() | {"ops.daily_brief"}
+
+
+def _audit_events_for_response(
+    payload: ChatRequest,
+    response: Any,
+    date_range: Optional[DateRange],
+) -> list[dict[str, Any]]:
+    now = _now_jakarta().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    actor_role = payload.actor_role.value if isinstance(payload.actor_role, ActorRole) else str(
+        payload.actor_role
+    )
+    source_kinds = sorted(
+        {
+            source.kind
+            for source in getattr(response, "sources", [])
+            if isinstance(getattr(source, "kind", None), str) and source.kind
+        }
+    )
+    events = []
+    for tool in getattr(response, "tool_calls", []):
+        name = getattr(tool, "name", None)
+        status = getattr(tool, "status", None)
+        if not isinstance(name, str) or name not in _auditable_tool_names():
+            continue
+        if not isinstance(status, str) or not status:
+            continue
+        event = {
+            "id": str(uuid4()),
+            "createdAt": now,
+            "actorRole": actor_role,
+            "tool": name,
+            "status": status,
+            "sourceKinds": source_kinds[:8],
+        }
+        if date_range is not None:
+            event["dateRangeLabel"] = date_range.label
+        events.append(event)
+    return events
 
 
 def _serialize_date_range(date_range: DateRange) -> dict[str, str]:
@@ -3075,10 +3368,16 @@ def _lead_search_query_from_assistant(message: str) -> str:
     )
     if detail_match:
         return _clean_search_query(detail_match.group(1))
+    table_match = re.search(r"^\|\s*\d+\s*\|\s*([^|\n]+?)\s*\|", message, flags=re.MULTILINE)
+    if table_match:
+        return _clean_search_query(table_match.group(1))
     match = re.search(r"^\s*\d+\.\s+([^(\n]+)", message, flags=re.MULTILINE)
     if match:
         return _clean_search_query(match.group(1))
-    match = re.search(r"^(.+?)\s+(?:mendaftarkan|belum punya data anak)", message)
+    match = re.search(
+        r"^(.+?)\s+(?:mendaftarkan|registered|does not have|belum punya data anak)",
+        message,
+    )
     if match:
         return _clean_search_query(match.group(1))
     return ""
@@ -3263,6 +3562,101 @@ def _answer_language(payload: ChatRequest, lowered_message: str) -> str:
         "students",
     )
     return "en" if any(term in lowered_message for term in english_terms) else "id"
+
+
+def _with_next_actions(answer: str, language: str, actions: list[str]) -> str:
+    if not actions:
+        return answer
+    label = "Next actions:" if language == "en" else "Langkah berikutnya:"
+    lines = [answer.rstrip(), "", label, *[f"- {action}" for action in actions]]
+    return "\n".join(lines)
+
+
+def _next_actions(kind: str, language: str) -> list[str]:
+    if language == "en":
+        actions = {
+            "eoi_count": [
+                "Ask who registered to see the latest EOIs.",
+                "Ask for an EOI + payment report to download Excel/PDF/Word.",
+                "Ask whether any payments are pending verification.",
+            ],
+            "eoi_list": [
+                "Ask for full details of a parent to see children, status, and payment state.",
+                "Ask to filter the list by today, yesterday, a date, or a date range.",
+                "Ask to export this view as Excel, PDF, Word, or Markdown.",
+            ],
+            "eoi_detail": [
+                "Ask for the registered children if you only need the student view.",
+                "Ask for the EOI + payment report if this needs to be shared.",
+                "Ask for a follow-up message draft for this parent.",
+            ],
+            "eoi_children": [
+                "Ask for the full EOI detail to include parent and payment context.",
+                "Ask to export the current EOI context as a report.",
+            ],
+            "payment_count": [
+                "Ask for the EOI + payment report to inspect the queue.",
+                "Ask for a specific date, for example yesterday or 19 days ago.",
+                "Ask for application fee pricing if the parent needs payment guidance.",
+            ],
+            "fee_quote": [
+                "Ask for one school only if you need a shorter parent reply.",
+                "Ask me to draft the payment instruction message.",
+            ],
+            "report": [
+                "Open or download Excel/PDF/Word from the document cards.",
+                "Ask for a summary of this report.",
+                "Ask to rerun it for a specific date range.",
+            ],
+            "ops_brief": [
+                "Ask to export today's EOI + payment report.",
+                "Ask for the newest EOI details.",
+                "Ask for payment review priorities.",
+            ],
+        }
+        return actions.get(kind, [])
+
+    actions = {
+        "eoi_count": [
+            "Tanya siapa yang daftar untuk melihat EOI terbaru.",
+            "Minta laporan EOI + pembayaran untuk download Excel/PDF/Word.",
+            "Tanya apakah ada pembayaran yang menunggu verifikasi.",
+        ],
+        "eoi_list": [
+            "Minta detail parent untuk melihat anak, status, dan payment state.",
+            "Filter daftar berdasarkan hari ini, kemarin, tanggal, atau rentang tanggal.",
+            "Export tampilan ini ke Excel, PDF, Word, atau Markdown.",
+        ],
+        "eoi_detail": [
+            "Tanya daftar anaknya kalau hanya butuh view siswa.",
+            "Minta laporan EOI + pembayaran kalau data ini perlu dibagikan.",
+            "Minta draft pesan follow-up untuk parent ini.",
+        ],
+        "eoi_children": [
+            "Minta detail EOI lengkap untuk konteks parent dan pembayaran.",
+            "Export konteks EOI ini sebagai laporan.",
+        ],
+        "payment_count": [
+            "Minta laporan EOI + pembayaran untuk cek antrian.",
+            "Tanya periode spesifik, misalnya kemarin atau 19 hari lalu.",
+            "Tanya biaya pendaftaran kalau parent butuh arahan payment.",
+        ],
+        "fee_quote": [
+            "Sebut satu sekolah saja kalau butuh jawaban singkat untuk parent.",
+            "Minta draft instruksi pembayaran untuk dikirim ke parent.",
+        ],
+        "report": [
+            "Buka atau download Excel/PDF/Word dari kartu dokumen.",
+            "Minta ringkasan dari laporan ini.",
+            "Jalankan ulang untuk tanggal atau rentang tanggal tertentu.",
+        ],
+        "ops_brief": [
+            "Export laporan EOI + pembayaran hari ini.",
+            "Lihat detail EOI terbaru.",
+            "Minta prioritas review pembayaran.",
+        ],
+    }
+    return actions.get(kind, [])
 
 
 def _auth_required(tool_name: str, subject: str) -> ToolAnswer:

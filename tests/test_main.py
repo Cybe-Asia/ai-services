@@ -364,6 +364,129 @@ def test_admin_chat_uses_structured_context_when_messages_are_pruned(monkeypatch
     assert body["toolCalls"][0] == {"name": "report.admissions_payments", "status": "ok"}
 
 
+def test_admin_thread_audit_records_tool_access_without_pii(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "1", "offset": "0"}
+        return {"data": {"total": 6}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    created = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={"message": "ada berapa eoi sekarang?", "actorRole": "admin"},
+    )
+    assert created.status_code == 200
+    conversation_id = created.json()["conversationId"]
+
+    response = client.get(
+        f"/api/ai/v1/threads/{conversation_id}/audit",
+        headers={"authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert events[0]["actorRole"] == "admin"
+    assert events[0]["tool"] == "admission.admin_leads_count"
+    assert events[0]["status"] == "ok"
+    serialized = json.dumps(events)
+    assert "ada berapa" not in serialized
+    assert "arief" not in serialized.casefold()
+
+
+def test_admin_contextual_detail_after_list_uses_stored_lead_query(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            if params == {"limit": "5", "offset": "0"}:
+                return {
+                    "data": {
+                        "total": 1,
+                        "rows": [
+                            {
+                                "leadId": "LEAD-1",
+                                "parentName": "Arief Nugraha",
+                                "email": "arief@example.test",
+                                "school": "SCH-IISS",
+                                "leadStatus": "verified",
+                                "applicantCount": 1,
+                            }
+                        ],
+                    }
+                }
+            assert params == {"limit": "5", "offset": "0", "search": "Arief Nugraha"}
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                            "applicantCount": 1,
+                        }
+                    ],
+                }
+            }
+
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1"
+        assert params == {}
+        return {
+            "data": {
+                "detail": {
+                    "lead": {
+                        "parent_name": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "whatsapp": "+628123456789",
+                        "target_school_preference": "SCH-IISS",
+                        "status": "verified",
+                    },
+                    "applicationStatus": "submitted",
+                    "applicantCount": 1,
+                },
+                "students": [{"fullName": "Aisha Nugraha", "ageAtApplication": 7}],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+
+    first = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={"message": "siapa yang daftar eoi?", "actorRole": "admin"},
+    )
+    assert first.status_code == 200
+    conversation_id = first.json()["conversationId"]
+    assert (
+        thread_store._MEMORY_THREADS[conversation_id]["context"]["lastLeadQuery"]
+        == "Arief Nugraha"
+    )
+
+    second = client.post(
+        "/api/ai/v1/chat",
+        headers={"authorization": "Bearer test-token"},
+        json={
+            "message": "detailnya",
+            "actorRole": "admin",
+            "conversationId": conversation_id,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert "Detail EOI lengkap untuk Arief Nugraha:" in body["answer"]
+    assert "Aisha Nugraha" in body["answer"]
+    assert body["toolCalls"][0] == {"name": "admission.admin_lead_detail", "status": "ok"}
+
+
 def test_admin_chat_streams_tool_events_and_persists_thread(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
 
@@ -902,6 +1025,39 @@ def test_owner_relative_days_ago_eoi_count_uses_date_filter(monkeypatch) -> None
     assert "19 hari lalu (30 Mei 2026)" in result.answer
 
 
+def test_owner_rolling_days_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-11T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        return {"data": {"total": 9}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa EOI 7 hari terakhir?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "9 EOI" in result.answer
+    assert "7 hari terakhir (12 Juni 2026 - 18 Juni 2026)" in result.answer
+
+
 def test_current_date_uses_deterministic_system_tool(monkeypatch) -> None:
     monkeypatch.setattr(
         service_tools,
@@ -1196,7 +1352,8 @@ def test_owner_english_eoi_count_uses_admission_tool(monkeypatch) -> None:
     )
 
     assert result is not None
-    assert result.answer == "There are 11 EOIs registered in admission-service."
+    assert "There are 11 EOIs registered in admission-service." in result.answer
+    assert "Next actions:" in result.answer
     assert result.tool_calls[0].name == "admission.admin_leads_count"
     assert result.tool_calls[0].status == "ok"
 
@@ -1574,10 +1731,11 @@ def test_owner_english_admission_price_returns_english(monkeypatch) -> None:
     )
 
     assert result is not None
-    assert result.answer == (
+    assert (
         "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, "
         "IIBS: Rp 1.000.000."
-    )
+    ) in result.answer
+    assert "Next actions:" in result.answer
     assert result.tool_calls[0].name == "payment.application_fee_quote"
     assert result.tool_calls[0].status == "ok"
 
@@ -1646,6 +1804,12 @@ def test_owner_admissions_payment_report_returns_export_links(monkeypatch) -> No
     assert result is not None
     assert "Admissions + payment report is ready." in result.answer
     assert "EOI rows: 1 total" in result.answer
+    assert "| # | Parent | Email | School | Lead status | Payment |" in result.answer
+    assert (
+        "| 1 | Arief Nugraha | arief@example.test | SCH-IISS | verified | "
+        "pending_verification |"
+    ) in result.answer
+    assert "| # | Parent | Email | School | Type | Status | Amount |" in result.answer
     assert [source.kind for source in result.sources] == ["file", "file", "file", "file"]
     assert result.sources[0].title == "Download Excel"
     assert result.sources[0].reference is not None

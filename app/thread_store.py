@@ -6,7 +6,7 @@ from uuid import uuid4
 import redis.asyncio as redis
 
 from app.config import Settings
-from app.schemas import SourceRef, ThreadMessage, ThreadSummary, ToolCallRef
+from app.schemas import AuditEvent, SourceRef, ThreadMessage, ThreadSummary, ToolCallRef
 
 _MEMORY_THREADS: dict[str, dict[str, Any]] = {}
 _MEMORY_OWNER_INDEX: dict[str, set[str]] = {}
@@ -74,6 +74,14 @@ class ThreadStore:
         record = await self.get_record(owner_id, thread_id)
         messages = [_message_from_record(row) for row in record["messages"]]
         return _summary_from_record(record), messages
+
+    async def get_audit_events(
+        self,
+        owner_id: str,
+        thread_id: str,
+    ) -> list[AuditEvent]:
+        record = await self.get_record(owner_id, thread_id)
+        return _audit_events_from_record(record)
 
     async def append_exchange(
         self,
@@ -278,6 +286,16 @@ def _message_from_record(record: dict[str, Any]) -> ThreadMessage:
         ],
         created_at=str(record.get("createdAt") or ""),
     )
+
+
+def _audit_events_from_record(record: dict[str, Any]) -> list[AuditEvent]:
+    context = record.get("context")
+    if not isinstance(context, dict):
+        return []
+    return [
+        AuditEvent.model_validate(event)
+        for event in _list_of_dicts(context.get("auditEvents"))
+    ]
 
 
 def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
