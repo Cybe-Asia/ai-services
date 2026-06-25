@@ -30,6 +30,7 @@ INTENT_CURRENT_DATE = "current_date"
 PAYMENT_STATUSES = {"pending_verification", "paid", "rejected", "underpaid"}
 DEFAULT_SCHOOL_CODES = ("IIHS", "IISS", "IIBS")
 REPORT_EXPORT_FORMATS = {"xlsx", "pdf", "docx", "md"}
+DEFAULT_REPORT_EXPORT_FORMATS = ("xlsx", "pdf", "docx", "md")
 REPORT_EXPORT_LIMIT = 500
 REPORT_PREVIEW_LIMIT = 5
 OPENXML_CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -1114,6 +1115,7 @@ async def _operations_brief_answer(
             "Saya belum bisa membuat brief operasional dari admission/payment service.",
         )
 
+    export_formats = _requested_report_export_formats(lowered_message)
     report_request = ReportRequest(
         date_range=date_range,
         language=language,
@@ -1125,6 +1127,7 @@ async def _operations_brief_answer(
         eoi_period_total=eoi_period_total,
         payment_pending_total=payment_pending_total,
         payment_period_pending_total=payment_period_pending_total,
+        export_formats=export_formats,
     )
     answer = _with_next_actions(answer, language, _next_actions("ops_brief", language))
     return ToolAnswer(
@@ -1132,7 +1135,7 @@ async def _operations_brief_answer(
         sources=[
             SourceRef(kind="service", title="admission-service admin leads", reference=None),
             SourceRef(kind="service", title="payment-service admin reviews", reference=None),
-            *_report_export_sources(report_request),
+            *_report_export_sources(report_request, export_formats),
         ],
         tool_calls=[
             ToolCallRef(name=tool_name, status="ok"),
@@ -1168,6 +1171,7 @@ def _format_operations_brief_answer(
     eoi_period_total: int,
     payment_pending_total: int,
     payment_period_pending_total: int,
+    export_formats: tuple[str, ...] = DEFAULT_REPORT_EXPORT_FORMATS,
 ) -> str:
     period = (
         "all time"
@@ -1200,7 +1204,7 @@ def _format_operations_brief_answer(
                 "Recommended focus:",
                 *[f"- {action}" for action in actions],
                 "",
-                "Export links are available as Excel, PDF, Word, and Markdown.",
+                _export_links_sentence(export_formats, language),
             ]
         )
 
@@ -1217,7 +1221,7 @@ def _format_operations_brief_answer(
             "Prioritas yang disarankan:",
             *[f"- {action}" for action in actions],
             "",
-            "Link export tersedia sebagai Excel, PDF, Word, dan Markdown.",
+            _export_links_sentence(export_formats, language),
         ]
     )
 
@@ -1291,6 +1295,7 @@ async def _admissions_payments_report_answer(
         REPORT_PREVIEW_LIMIT,
         payload,
     )
+    export_formats = _requested_report_export_formats(lowered_message)
     try:
         report = await build_admissions_payments_report(settings, authorization, request)
     except httpx.HTTPStatusError as exc:
@@ -1307,7 +1312,7 @@ async def _admissions_payments_report_answer(
             "Saya belum bisa membuat laporan dari admission/payment service.",
         )
 
-    answer = _format_report_preview_answer(report)
+    answer = _format_report_preview_answer(report, export_formats)
     sources = _report_export_sources(
         request=ReportRequest(
             date_range=request.date_range,
@@ -1316,7 +1321,8 @@ async def _admissions_payments_report_answer(
             school=request.school,
             search=request.search,
             limit=REPORT_EXPORT_LIMIT,
-        )
+        ),
+        export_formats=export_formats,
     )
     return ToolAnswer(
         answer=answer,
@@ -1466,7 +1472,10 @@ async def _fetch_report_payment_rows(
     return rows[: request.limit], total
 
 
-def _format_report_preview_answer(report: AdmissionsPaymentsReport) -> str:
+def _format_report_preview_answer(
+    report: AdmissionsPaymentsReport,
+    export_formats: tuple[str, ...] = DEFAULT_REPORT_EXPORT_FORMATS,
+) -> str:
     request = report.request
     language = request.language
     period = _report_period_label(request)
@@ -1478,7 +1487,7 @@ def _format_report_preview_answer(report: AdmissionsPaymentsReport) -> str:
             f"Period: {period}.",
             f"EOI rows: {report.lead_total} total; previewing {lead_shown}.",
             f"Payment review rows: {report.payment_total} total; previewing {payment_shown}.",
-            "Export links are available as Excel, PDF, Word, and Markdown.",
+            _export_links_sentence(export_formats, language),
         ]
     else:
         lines = [
@@ -1486,7 +1495,7 @@ def _format_report_preview_answer(report: AdmissionsPaymentsReport) -> str:
             f"Periode: {period}.",
             f"Data EOI: {report.lead_total} total; preview {lead_shown}.",
             f"Data review pembayaran: {report.payment_total} total; preview {payment_shown}.",
-            "Link export tersedia sebagai Excel, PDF, Word, dan Markdown.",
+            _export_links_sentence(export_formats, language),
         ]
 
     if report.lead_rows:
@@ -1577,7 +1586,10 @@ def _preview_payment_lines(rows: list[dict[str, Any]], language: str) -> list[st
     return lines
 
 
-def _report_export_sources(request: ReportRequest) -> list[SourceRef]:
+def _report_export_sources(
+    request: ReportRequest,
+    export_formats: tuple[str, ...] = DEFAULT_REPORT_EXPORT_FORMATS,
+) -> list[SourceRef]:
     labels = {
         "xlsx": "Download Excel",
         "pdf": "Download PDF",
@@ -1593,8 +1605,79 @@ def _report_export_sources(request: ReportRequest) -> list[SourceRef]:
                 f"{_report_query(request, export_format)}"
             ),
         )
-        for export_format in ("xlsx", "pdf", "docx", "md")
+        for export_format in _clean_report_export_formats(export_formats)
     ]
+
+
+def _requested_report_export_formats(message: str) -> tuple[str, ...]:
+    if _asks_for_all_report_formats(message):
+        return DEFAULT_REPORT_EXPORT_FORMATS
+
+    requested = []
+    if any(term in message for term in ("excel", "xlsx", "spreadsheet")):
+        requested.append("xlsx")
+    if "pdf" in message:
+        requested.append("pdf")
+    if any(term in message for term in ("word", "docx")):
+        requested.append("docx")
+    if "markdown" in message or re.search(r"\bmd\b", message):
+        requested.append("md")
+
+    return _clean_report_export_formats(tuple(requested)) or DEFAULT_REPORT_EXPORT_FORMATS
+
+
+def _asks_for_all_report_formats(message: str) -> bool:
+    all_format_terms = (
+        "all format",
+        "all formats",
+        "every format",
+        "semua format",
+        "semua file",
+        "all files",
+    )
+    return any(term in message for term in all_format_terms)
+
+
+def _clean_report_export_formats(export_formats: tuple[str, ...]) -> tuple[str, ...]:
+    result = []
+    for export_format in DEFAULT_REPORT_EXPORT_FORMATS:
+        if export_format in export_formats and export_format not in result:
+            result.append(export_format)
+    return tuple(result)
+
+
+def _export_links_sentence(export_formats: tuple[str, ...], language: str) -> str:
+    formats = _clean_report_export_formats(export_formats) or DEFAULT_REPORT_EXPORT_FORMATS
+    names = {
+        "xlsx": "Excel",
+        "pdf": "PDF",
+        "docx": "Word",
+        "md": "Markdown",
+    }
+    formatted = _format_human_list([names[export_format] for export_format in formats], language)
+    if language == "en":
+        return (
+            f"Export link is available as {formatted}."
+            if len(formats) == 1
+            else f"Export links are available as {formatted}."
+        )
+    return (
+        f"Link export tersedia sebagai {formatted}."
+        if len(formats) == 1
+        else f"Link export tersedia sebagai {formatted}."
+    )
+
+
+def _format_human_list(values: list[str], language: str) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        connector = " and " if language == "en" else " dan "
+        return connector.join(values)
+    connector = "and" if language == "en" else "dan"
+    return f"{', '.join(values[:-1])}, {connector} {values[-1]}"
 
 
 def _report_query(request: ReportRequest, export_format: str) -> str:
@@ -2546,6 +2629,10 @@ def _date_range_from_message(message: str) -> Optional[DateRange]:
             f"bulan ini ({ID_MONTH_NAMES[first_this_month.month]} {first_this_month.year})",
         )
 
+    span = _date_span_from_message(message, now.year)
+    if span is not None:
+        return span
+
     specific = _specific_date_from_message(message, now.year)
     if specific is not None:
         return _single_day_range(specific, _format_day_label(specific))
@@ -2694,6 +2781,33 @@ def _specific_date_from_message(message: str, default_year: int):
     return None
 
 
+def _date_span_from_message(message: str, default_year: int) -> Optional[DateRange]:
+    month_names = "|".join(sorted(MONTH_ALIASES, key=len, reverse=True))
+    same_month_match = re.search(
+        rf"\b(?P<start>\d{{1,2}})\s*(?:-|sampai|hingga|sd|s/d|to|until)\s*"
+        rf"(?P<end>\d{{1,2}})\s+(?P<month>{month_names})"
+        rf"(?:\s+(?P<year>\d{{2,4}}))?\b",
+        message,
+    )
+    if not same_month_match:
+        return None
+
+    year = _normalize_year(same_month_match.group("year"), default_year)
+    month = MONTH_ALIASES[same_month_match.group("month")]
+    start_day = int(same_month_match.group("start"))
+    end_day = int(same_month_match.group("end"))
+    start = _safe_date(year, month, start_day)
+    end = _safe_date(year, month, end_day)
+    if start is None or end is None or end < start:
+        return None
+
+    return _range_from_dates(
+        start,
+        end + timedelta(days=1),
+        f"{_format_day_label(start)} - {_format_day_label(end)}",
+    )
+
+
 def _date_scope(date_range: Optional[DateRange], language: str) -> str:
     if date_range is None:
         return ""
@@ -2827,6 +2941,12 @@ def _asks_for_eoi_count(message: str) -> bool:
         "inquiry",
         "inquiries",
     )
+    existence_match = re.search(
+        r"\bada\s+(?:berapa\s+)?(?:eoi|lead|pendaftar|registrasi|registration|enquir(?:y|ies)|inquir(?:y|ies))\b",
+        message,
+    )
+    if existence_match:
+        return True
     return any(term in message for term in count_terms) and any(
         term in message for term in eoi_terms
     )
@@ -3322,6 +3442,15 @@ def _lead_search_query_from_context(payload: ChatRequest, lowered_message: str) 
     if query:
         return query
 
+    index = _lead_list_index_from_message(lowered_message)
+    if index is not None:
+        for turn in reversed(payload.history[-10:]):
+            if turn.role != "assistant":
+                continue
+            query = _lead_search_query_from_assistant_list(turn.content, index)
+            if query:
+                return query
+
     context = _thread_context(payload)
     query = context.get("lastLeadQuery")
     if isinstance(query, str) and query.strip():
@@ -3383,6 +3512,47 @@ def _lead_search_query_from_assistant(message: str) -> str:
     return ""
 
 
+def _lead_search_query_from_assistant_list(message: str, index: int) -> str:
+    if index <= 0:
+        return ""
+
+    table_rows = re.findall(r"^\|\s*(\d+)\s*\|\s*([^|\n]+?)\s*\|", message, flags=re.MULTILINE)
+    for raw_index, raw_name in table_rows:
+        if int(raw_index) == index:
+            return _clean_search_query(raw_name)
+
+    list_rows = re.findall(r"^\s*(\d+)\.\s+([^(\n]+)", message, flags=re.MULTILINE)
+    for raw_index, raw_name in list_rows:
+        if int(raw_index) == index:
+            return _clean_search_query(raw_name)
+    return ""
+
+
+def _lead_list_index_from_message(message: str) -> Optional[int]:
+    ordinal_aliases = {
+        "pertama": 1,
+        "kesatu": 1,
+        "kedua": 2,
+        "ketiga": 3,
+        "keempat": 4,
+        "kelima": 5,
+        "first": 1,
+        "second": 2,
+        "third": 3,
+        "fourth": 4,
+        "fifth": 5,
+    }
+    match = re.search(r"\b(?:nomor|no\.?|number|urutan|yang ke|ke-?)\s*(\d{1,2})\b", message)
+    if match:
+        index = int(match.group(1))
+        return index if 1 <= index <= 20 else None
+
+    for word, index in ordinal_aliases.items():
+        if re.search(rf"\b(?:yang\s+)?{word}\b", message):
+            return index
+    return None
+
+
 def _clean_search_query(value: str) -> str:
     cleaned = re.sub(
         r"\b(?:berapa|jumlah|anak|siswa|murid|child|children|student|students|eoi|lead)\b",
@@ -3410,6 +3580,14 @@ def _asks_for_payment_review_count(message: str) -> bool:
     )
     if not any(term in message for term in payment_terms):
         return False
+    if re.search(r"\bada\s+(?:payment|payments|pembayaran|tagihan|invoice)\b", message):
+        return True
+    casual_payment_pattern = (
+        r"\b(?:payment|payments|pembayaran|tagihan|invoice)\s+"
+        r"(?:gak|nggak|ga|tidak|hari ini|today)\b"
+    )
+    if re.search(casual_payment_pattern, message):
+        return True
     return any(term in message for term in count_terms) or any(
         term in message for term in review_terms
     )

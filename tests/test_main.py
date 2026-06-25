@@ -1167,6 +1167,39 @@ def test_owner_contextual_last_month_eoi_count_uses_date_filter(monkeypatch) -> 
     assert "bulan lalu (Mei 2026)" in result.answer
 
 
+def test_owner_casual_today_eoi_question_uses_count_tool(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-17T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        return {"data": {"total": 2}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada eoi hari ini?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Ada 2 EOI terdaftar hari ini" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_count"
+
+
 def test_owner_specific_date_leads_list_uses_date_filter(monkeypatch) -> None:
     monkeypatch.setattr(
         service_tools,
@@ -1211,6 +1244,39 @@ def test_owner_specific_date_leads_list_uses_date_filter(monkeypatch) -> None:
     assert "1 EOI 17 Juni 2026" in result.answer
     assert "Arief Nugraha" in result.answer
     assert result.tool_calls[0].name == "admission.admin_leads_list"
+
+
+def test_owner_same_month_date_range_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-05-31T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-10T16:59:59.999000+00:00"
+        return {"data": {"total": 7}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa eoi 1-10 Juni 2026?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "7 EOI" in result.answer
+    assert "1 Juni 2026 - 10 Juni 2026" in result.answer
 
 
 def test_owner_named_lead_child_count_uses_admission_tool(monkeypatch) -> None:
@@ -1450,6 +1516,75 @@ def test_owner_contextual_lead_detail_returns_full_fields(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_contextual_detail_can_use_ordinal_from_previous_list(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params == {"limit": "5", "offset": "0", "search": "Bima Santoso"}
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-2",
+                            "parentName": "Bima Santoso",
+                            "email": "bima@example.test",
+                            "school": "SCH-IIHS",
+                            "leadStatus": "new",
+                            "applicantCount": 1,
+                        }
+                    ],
+                }
+            }
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-2"
+        assert params == {}
+        return {
+            "data": {
+                "detail": {
+                    "lead": {
+                        "parent_name": "Bima Santoso",
+                        "email": "bima@example.test",
+                        "target_school_preference": "SCH-IIHS",
+                        "status": "new",
+                    },
+                    "applicantCount": 1,
+                },
+                "students": [],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="detail nomor 2",
+                actor_role=ActorRole.admin,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "Ada 2 EOI. Saya tampilkan 2 yang terbaru:\n"
+                            "1. Arief Nugraha (arief@example.test)\n"
+                            "2. Bima Santoso (bima@example.test)"
+                        ),
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_list", "status": "ok"}
+                        ],
+                    }
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Detail EOI lengkap untuk Bima Santoso:" in result.answer
+    assert "- Email: bima@example.test" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_lead_detail"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_paraphrased_registration_count_uses_llm_classifier(monkeypatch) -> None:
     class FakeLlmClient:
         def __init__(self, settings):
@@ -1578,6 +1713,42 @@ def test_owner_payment_count_uses_date_filter(monkeypatch) -> None:
 
     assert result is not None
     assert "6 pembayaran" in result.answer
+    assert "hari ini" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_review_count"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_casual_today_payment_question_uses_payment_tool(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params["status"] == "pending_verification"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-17T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        return {"data": {"total": 1}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada payment gak hari ini?",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Ada 1 pembayaran" in result.answer
     assert "hari ini" in result.answer
     assert result.tool_calls[0].name == "payment.admin_review_count"
     assert result.tool_calls[0].status == "ok"
@@ -1890,11 +2061,61 @@ def test_owner_contextual_pdf_export_uses_report_tool_and_recent_date(monkeypatc
     assert result is not None
     assert "Laporan EOI + pembayaran sudah siap." in result.answer
     assert "kemarin (18 Juni 2026)" in result.answer
+    assert "Link export tersedia sebagai PDF." in result.answer
+    assert [source.title for source in result.sources] == ["Download PDF"]
     pdf_source = next(source for source in result.sources if source.title == "Download PDF")
     assert pdf_source.reference is not None
     assert "format=pdf" in pdf_source.reference
+    assert "format=xlsx" not in pdf_source.reference
+    assert "format=docx" not in pdf_source.reference
+    assert "format=md" not in pdf_source.reference
     assert "dateFrom=" in pdf_source.reference
     assert result.tool_calls[0].name == "report.admissions_payments"
+
+
+def test_owner_explicit_pdf_report_returns_only_pdf_link(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert authorization == "Bearer test-token"
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params["limit"] == "5"
+            assert params["offset"] == "0"
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        return {"data": {"total": 0, "rows": []}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="export laporan eoi dan payment ke pdf",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Laporan EOI + pembayaran sudah siap." in result.answer
+    assert "Link export tersedia sebagai PDF." in result.answer
+    assert [source.title for source in result.sources] == ["Download PDF"]
+    assert result.sources[0].reference is not None
+    assert "format=pdf" in result.sources[0].reference
 
 
 def test_admin_can_download_admissions_payment_report_xlsx(monkeypatch) -> None:
