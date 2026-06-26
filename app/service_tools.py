@@ -400,10 +400,9 @@ def _contextual_tool_intent(
             or _history_has_tool_call(payload, "admission.admin_lead_child_count")
             or _history_has_tool_call(payload, "admission.admin_lead_students_list")
             or _history_has_tool_call(payload, "admission.admin_lead_detail")
+            or _history_has_tool_call(payload, "admission.admin_leads_count")
         ):
             return ToolIntent(INTENT_ADMISSION_LEAD_DETAIL)
-        if _history_has_tool_call(payload, "admission.admin_leads_count"):
-            return ToolIntent(INTENT_ADMISSION_LEADS_LIST)
 
     if _asks_for_contextual_lead_identity(lowered_message) and (
         _history_has_tool_call(payload, "admission.admin_leads_count")
@@ -652,14 +651,14 @@ async def _admission_leads_list(
     if not _has_bearer_token(authorization):
         return _auth_required(tool_name, "daftar EOI")
 
-    url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
     try:
-        body = await _get_json(
-            url,
+        rows, total = await _fetch_lead_rows(
+            settings,
             authorization,
-            _lead_list_params(limit=5, offset=0, date_range=date_range),
+            limit=5,
+            offset=0,
+            date_range=date_range,
         )
-        rows, total = _extract_lead_rows(body)
     except httpx.HTTPStatusError as exc:
         auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
         if auth_error is not None:
@@ -674,38 +673,7 @@ async def _admission_leads_list(
             "Saya belum bisa mengambil daftar EOI dari admission-service.",
         )
 
-    scope = _date_scope(date_range, language)
-    if total == 0 or not rows:
-        answer = (
-            f"No EOIs are registered{scope} in admission-service."
-            if language == "en"
-            else f"Belum ada EOI terdaftar{scope} di admission-service."
-        )
-    else:
-        shown = min(len(rows), 5)
-        lines = [
-            f"There are {total} EOIs{scope}. Showing the latest {shown}:"
-            if language == "en"
-            else f"Ada {total} EOI{scope}. Saya tampilkan {shown} yang terbaru:"
-        ]
-        for index, row in enumerate(rows[:shown], start=1):
-            name = _clean_text(row.get("parentName")) or (
-                "Name unavailable" if language == "en" else "Nama belum tersedia"
-            )
-            email = _clean_text(row.get("email"))
-            school = _clean_text(row.get("school"))
-            lead_status = _clean_text(row.get("leadStatus"))
-            details = []
-            if email:
-                details.append(email)
-            if school:
-                details.append(f"school: {school}" if language == "en" else f"sekolah: {school}")
-            if lead_status:
-                details.append(f"status: {lead_status}")
-            suffix = f" ({'; '.join(details)})" if details else ""
-            lines.append(f"{index}. {name}{suffix}")
-        answer = "\n".join(lines)
-
+    answer = _format_leads_list_answer(rows, total, date_range, language)
     answer = _with_next_actions(answer, language, _next_actions("eoi_list", language))
     return ToolAnswer(
         answer=answer,
@@ -726,22 +694,26 @@ async def _admission_lead_detail(
         return _auth_required(tool_name, "detail EOI")
 
     query = _lead_search_query_from_context(payload, lowered_message)
-    if not query:
-        return _tool_failed(
-            tool_name,
-            "I need the parent name or EOI email to show the full detail."
-            if language == "en"
-            else "Saya perlu nama parent atau email EOI untuk menampilkan detail lengkap.",
-        )
-
     try:
-        row, total = await _find_lead_row(settings, authorization, query)
+        if query:
+            row, total = await _find_lead_row(settings, authorization, query)
+        else:
+            row, total, selection_answer = await _contextual_lead_row_for_detail(
+                settings,
+                authorization,
+                payload,
+                lowered_message,
+                language,
+            )
+            if selection_answer is not None:
+                return selection_answer
         if row is None:
+            query_label = f"'{query}'" if query else "that context"
             return ToolAnswer(
                 answer=(
-                    f"I could not find an EOI for '{query}' in admission-service."
+                    f"I could not find an EOI for {query_label} in admission-service."
                     if language == "en"
-                    else f"Saya belum menemukan EOI untuk '{query}' di admission-service."
+                    else f"Saya belum menemukan EOI untuk {query_label} di admission-service."
                 ),
                 sources=[],
                 tool_calls=[ToolCallRef(name=tool_name, status="not_found")],
@@ -994,6 +966,57 @@ async def _admission_lead_students_list(
             SourceRef(kind="service", title="admission-service admin lead detail", reference=None)
         ],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+async def _contextual_lead_row_for_detail(
+    settings: Settings,
+    authorization: Optional[str],
+    payload: ChatRequest,
+    lowered_message: str,
+    language: str,
+) -> tuple[Optional[dict[str, Any]], int, Optional[ToolAnswer]]:
+    date_range = _lead_list_date_range(
+        payload,
+        lowered_message,
+        _date_range_from_message(lowered_message),
+    )
+    rows, total = await _fetch_lead_rows(
+        settings,
+        authorization,
+        limit=5,
+        offset=0,
+        date_range=date_range,
+    )
+    if total == 1 and rows:
+        return rows[0], total, None
+
+    answer = _format_leads_list_answer(rows, total, date_range, language)
+    if total > 1 and rows:
+        answer = (
+            f"{answer}\n\nTell me the number, parent name, or email to open the full detail."
+            if language == "en"
+            else (
+                f"{answer}\n\n"
+                "Sebutkan nomor, nama parent, atau email untuk membuka detail lengkap."
+            )
+        )
+    answer = _with_next_actions(answer, language, _next_actions("eoi_list", language))
+    return (
+        None,
+        total,
+        ToolAnswer(
+            answer=answer,
+            sources=[
+                SourceRef(kind="service", title="admission-service admin leads", reference=None)
+            ],
+            tool_calls=[
+                ToolCallRef(
+                    name="admission.admin_leads_list",
+                    status="ok" if rows else "not_found",
+                )
+            ],
+        ),
     )
 
 
@@ -1887,6 +1910,8 @@ def _should_reuse_recent_date_for_lead_list(message: str) -> bool:
         "list",
         "daftar eoi",
         "daftar lead",
+        "detail",
+        "detailnya",
         "tampilkan",
         "lihat",
         "show",
@@ -2440,14 +2465,39 @@ async def _find_lead_row(
     authorization: Optional[str],
     query: str,
 ) -> tuple[Optional[dict[str, Any]], int]:
+    rows, total = await _fetch_lead_rows(
+        settings,
+        authorization,
+        limit=5,
+        offset=0,
+        search=query,
+    )
+    return (rows[0] if rows else None), total
+
+
+async def _fetch_lead_rows(
+    settings: Settings,
+    authorization: Optional[str],
+    *,
+    limit: int,
+    offset: int,
+    date_range: Optional[DateRange] = None,
+    school: str = "",
+    search: str = "",
+) -> tuple[list[dict[str, Any]], int]:
     url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
     body = await _get_json(
         url,
         authorization,
-        {"limit": "5", "offset": "0", "search": query},
+        _lead_list_params(
+            limit=limit,
+            offset=offset,
+            date_range=date_range,
+            school=school,
+            search=search,
+        ),
     )
-    rows, total = _extract_lead_rows(body)
-    return (rows[0] if rows else None), total
+    return _extract_lead_rows(body)
 
 
 def _lead_list_params(
@@ -2466,6 +2516,45 @@ def _lead_list_params(
     if search:
         params["search"] = search
     return params
+
+
+def _format_leads_list_answer(
+    rows: list[dict[str, Any]],
+    total: int,
+    date_range: Optional[DateRange],
+    language: str,
+) -> str:
+    scope = _date_scope(date_range, language)
+    if total == 0 or not rows:
+        return (
+            f"No EOIs are registered{scope} in admission-service."
+            if language == "en"
+            else f"Belum ada EOI terdaftar{scope} di admission-service."
+        )
+
+    shown = min(len(rows), 5)
+    lines = [
+        f"There are {total} EOIs{scope}. Showing the latest {shown}:"
+        if language == "en"
+        else f"Ada {total} EOI{scope}. Saya tampilkan {shown} yang terbaru:"
+    ]
+    for index, row in enumerate(rows[:shown], start=1):
+        name = _clean_text(row.get("parentName")) or (
+            "Name unavailable" if language == "en" else "Nama belum tersedia"
+        )
+        email = _clean_text(row.get("email"))
+        school = _clean_text(row.get("school"))
+        lead_status = _clean_text(row.get("leadStatus"))
+        details = []
+        if email:
+            details.append(email)
+        if school:
+            details.append(f"school: {school}" if language == "en" else f"sekolah: {school}")
+        if lead_status:
+            details.append(f"status: {lead_status}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"{index}. {name}{suffix}")
+    return "\n".join(lines)
 
 
 def _extract_student_rows(body: dict[str, Any]) -> list[dict[str, Any]]:

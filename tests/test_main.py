@@ -538,10 +538,33 @@ def test_admin_chat_streams_contextual_detail_followup(monkeypatch) -> None:
                     "total": 1,
                     "rows": [
                         {
+                            "leadId": "LEAD-1",
                             "parentName": "Arief Nugraha",
                             "email": "arief@example.test",
                             "school": "SCH-IISS",
                             "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        if url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1":
+            assert params == {}
+            return {
+                "data": {
+                    "detail": {
+                        "lead": {
+                            "parent_name": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "target_school_preference": "SCH-IISS",
+                            "status": "verified",
+                        },
+                        "applicantCount": 1,
+                    },
+                    "students": [
+                        {
+                            "fullName": "Aisha Nugraha",
+                            "dateOfBirth": "2019-05-19",
+                            "ageAtApplication": 7,
                         }
                     ],
                 }
@@ -570,11 +593,12 @@ def test_admin_chat_streams_contextual_detail_followup(monkeypatch) -> None:
 
     assert response.status_code == 200
     events = parse_sse_events(response.text)
-    assert ("tool_call", {"name": "admission.admin_leads_list", "status": "ok"}) in events
+    assert ("tool_call", {"name": "admission.admin_lead_detail", "status": "ok"}) in events
     streamed_text = "".join(data["text"] for event, data in events if event == "delta")
-    assert "Arief Nugraha" in streamed_text
+    assert "Detail EOI lengkap untuk Arief Nugraha:" in streamed_text
+    assert "Aisha Nugraha" in streamed_text
     assert events[-1][1]["toolCalls"] == [
-        {"name": "admission.admin_leads_list", "status": "ok"}
+        {"name": "admission.admin_lead_detail", "status": "ok"}
     ]
 
 
@@ -919,7 +943,7 @@ def test_owner_eoi_identity_followup_keeps_recent_date(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
-def test_owner_contextual_detail_followup_uses_leads_list_tool(monkeypatch) -> None:
+def test_owner_contextual_detail_followup_opens_single_lead_detail(monkeypatch) -> None:
     class ExplodingLlmClient:
         def __init__(self, settings):
             pass
@@ -928,18 +952,43 @@ def test_owner_contextual_detail_followup_uses_leads_list_tool(monkeypatch) -> N
             raise AssertionError("detail follow-up should use deterministic admission tool")
 
     async def fake_get_json(url, authorization, params):
-        assert url == "http://admission-service/api/leads/v1/admin/leads"
         assert authorization == "Bearer test-token"
-        assert params == {"limit": "5", "offset": "0"}
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params == {"limit": "5", "offset": "0"}
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1"
+        assert params == {}
         return {
             "data": {
-                "total": 1,
-                "rows": [
-                    {
-                        "parentName": "Arief Nugraha",
+                "detail": {
+                    "lead": {
+                        "parent_name": "Arief Nugraha",
                         "email": "arief@example.test",
-                        "school": "SCH-IISS",
-                        "leadStatus": "verified",
+                        "whatsapp": "+628123456789",
+                        "target_school_preference": "SCH-IISS",
+                        "status": "verified",
+                    },
+                    "applicantCount": 1,
+                    "latestPaymentStatus": "pending_verification",
+                },
+                "students": [
+                    {
+                        "fullName": "Aisha Nugraha",
+                        "dateOfBirth": "2019-05-19",
+                        "ageAtApplication": 7,
                     }
                 ],
             }
@@ -968,27 +1017,57 @@ def test_owner_contextual_detail_followup_uses_leads_list_tool(monkeypatch) -> N
     )
 
     assert result is not None
-    assert "Arief Nugraha" in result.answer
-    assert result.tool_calls[0].name == "admission.admin_leads_list"
+    assert "Detail EOI lengkap untuk Arief Nugraha:" in result.answer
+    assert "- Email: arief@example.test" in result.answer
+    assert "1. Aisha Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_lead_detail"
     assert result.tool_calls[0].status == "ok"
 
 
-def test_owner_contextual_detail_uses_structured_thread_context(monkeypatch) -> None:
+def test_owner_contextual_detail_uses_structured_thread_context_and_recent_date(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
     async def fake_get_json(url, authorization, params):
-        assert url == "http://admission-service/api/leads/v1/admin/leads"
         assert authorization == "Bearer test-token"
-        assert params == {"limit": "5", "offset": "0"}
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params["limit"] == "5"
+            assert params["offset"] == "0"
+            assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+            assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1"
+        assert params == {}
         return {
             "data": {
-                "total": 1,
-                "rows": [
-                    {
-                        "parentName": "Arief Nugraha",
+                "detail": {
+                    "lead": {
+                        "parent_name": "Arief Nugraha",
                         "email": "arief@example.test",
-                        "school": "SCH-IISS",
-                        "leadStatus": "verified",
-                    }
-                ],
+                        "target_school_preference": "SCH-IISS",
+                        "status": "verified",
+                    },
+                    "applicantCount": 1,
+                },
+                "students": [],
             }
         }
 
@@ -998,10 +1077,25 @@ def test_owner_contextual_detail_uses_structured_thread_context(monkeypatch) -> 
             ChatRequest(
                 message="detailnya",
                 actor_role=ActorRole.admin,
+                history=[
+                    {"role": "user", "content": "Ada berapa yang daftar hari ini?"},
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar hari ini di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    },
+                ],
                 metadata={
                     "threadContext": {
                         "lastOkTool": "admission.admin_leads_count",
                         "recentOkTools": ["admission.admin_leads_count"],
+                        "lastDateRange": {
+                            "start": "2026-06-19T00:00:00+07:00",
+                            "end": "2026-06-19T23:59:59.999000+07:00",
+                            "label": "hari ini",
+                        },
                     }
                 },
             ),
@@ -1011,8 +1105,9 @@ def test_owner_contextual_detail_uses_structured_thread_context(monkeypatch) -> 
     )
 
     assert result is not None
-    assert "Arief Nugraha" in result.answer
-    assert result.tool_calls[0].name == "admission.admin_leads_list"
+    assert "Detail EOI lengkap untuk Arief Nugraha:" in result.answer
+    assert "- Email: arief@example.test" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_lead_detail"
     assert result.tool_calls[0].status == "ok"
 
 
