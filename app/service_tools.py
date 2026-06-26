@@ -1711,7 +1711,7 @@ def _preview_payment_lines(rows: list[dict[str, Any]], language: str) -> list[st
         email = _clean_text(row.get("parentEmail")) or "-"
         school = _clean_text(row.get("school")) or "-"
         payment_type = _clean_text(row.get("paymentType")) or "-"
-        amount = _format_money(row.get("amount"), row.get("currency"))
+        amount = _format_optional_money(row.get("amount"), row.get("currency"))
         status = _clean_text(row.get("status")) or "-"
         lines.append(
             "| "
@@ -1730,6 +1730,24 @@ def _preview_payment_lines(rows: list[dict[str, Any]], language: str) -> list[st
             + " |"
         )
     return lines
+
+
+def _format_optional_money(amount: Any, currency: Any) -> str:
+    if amount is None or isinstance(amount, bool):
+        return "-"
+    if isinstance(amount, int):
+        return _format_money(amount, currency)
+    if isinstance(amount, float) and amount.is_integer():
+        return _format_money(int(amount), currency)
+    if isinstance(amount, str):
+        text = _clean_text(amount)
+        if not text:
+            return "-"
+        normalized = text.replace(".", "").replace(",", "").replace(" ", "")
+        if normalized.isdigit():
+            return _format_money(int(normalized), currency)
+        return text
+    return _string_value(amount) or "-"
 
 
 def _report_export_sources(

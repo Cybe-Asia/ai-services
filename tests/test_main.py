@@ -2043,6 +2043,60 @@ def test_owner_payment_identity_prompt_lists_review_rows(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_payment_review_list_tolerates_missing_amount(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params["status"] == "pending_verification"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        return {
+            "data": {
+                "total": 2,
+                "rows": [
+                    {
+                        "paymentId": "PAY-1",
+                        "parentName": "Arief Nugraha",
+                        "parentEmail": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "paymentType": "application_fee",
+                        "status": "pending_verification",
+                    },
+                    {
+                        "paymentId": "PAY-2",
+                        "parentName": "Bima Santoso",
+                        "parentEmail": "bima@example.test",
+                        "school": "SCH-IIHS",
+                        "paymentType": "application_fee",
+                        "status": "pending_verification",
+                        "amount": "1000000",
+                        "currency": "IDR",
+                    },
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="list payment pending",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "| 1 | Arief Nugraha | arief@example.test | SCH-IISS" in result.answer
+    assert "pending_verification | - |" in result.answer
+    assert "| 2 | Bima Santoso | bima@example.test | SCH-IIHS" in result.answer
+    assert "pending_verification | Rp 1.000.000 |" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_reviews_list"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_contextual_payment_identity_followup_keeps_recent_date(monkeypatch) -> None:
     monkeypatch.setattr(
         service_tools,
