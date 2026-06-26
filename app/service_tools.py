@@ -732,14 +732,7 @@ async def _admission_lead_detail(
                 sources=[],
                 tool_calls=[ToolCallRef(name=tool_name, status="not_found")],
             )
-        lead_id = _clean_text(row.get("leadId"))
-        if not lead_id:
-            raise ValueError("lead row missing leadId")
-        detail_url = _join_url(
-            settings.admission_service_url,
-            f"/api/leads/v1/admin/leads/{lead_id}",
-        )
-        body = await _get_json(detail_url, authorization, {})
+        body = await _fetch_lead_detail_body(settings, authorization, row)
         detail, lead, students = _extract_lead_detail(body)
     except httpx.HTTPStatusError as exc:
         auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
@@ -809,8 +802,10 @@ async def _admission_lead_child_count(
             else f"Saya belum menemukan EOI untuk '{query}' di admission-service."
         )
     else:
-        name = _clean_text(row.get("parentName")) or query
-        count = _safe_int(row.get("applicantCount"))
+        detail_body = await _fetch_lead_detail_body(settings, authorization, row)
+        detail, _lead, students = _extract_lead_detail(detail_body)
+        name = _first_text(_lead, row, "parent_name", "parentName") or query
+        count = _lead_child_count(row, detail, students)
         school = _clean_text(row.get("school"))
         status = _clean_text(row.get("leadStatus"))
         suffix = []
@@ -880,14 +875,7 @@ async def _admission_lead_students_list(
                 sources=[],
                 tool_calls=[ToolCallRef(name=tool_name, status="not_found")],
             )
-        lead_id = _clean_text(row.get("leadId"))
-        if not lead_id:
-            raise ValueError("lead row missing leadId")
-        detail_url = _join_url(
-            settings.admission_service_url,
-            f"/api/leads/v1/admin/leads/{lead_id}",
-        )
-        body = await _get_json(detail_url, authorization, {})
+        body = await _fetch_lead_detail_body(settings, authorization, row)
         students = _extract_student_rows(body)
     except httpx.HTTPStatusError as exc:
         auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
@@ -2514,6 +2502,21 @@ async def _fetch_lead_rows(
     return _extract_lead_rows(body)
 
 
+async def _fetch_lead_detail_body(
+    settings: Settings,
+    authorization: Optional[str],
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    lead_id = _clean_text(row.get("leadId"))
+    if not lead_id:
+        raise ValueError("lead row missing leadId")
+    detail_url = _join_url(
+        settings.admission_service_url,
+        f"/api/leads/v1/admin/leads/{lead_id}",
+    )
+    return await _get_json(detail_url, authorization, {})
+
+
 def _lead_list_params(
     limit: int,
     offset: int,
@@ -2609,6 +2612,20 @@ def _extract_fee_row(body: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _lead_child_count(
+    row: dict[str, Any],
+    detail: dict[str, Any],
+    students: list[dict[str, Any]],
+) -> int:
+    detail_count = _safe_int(detail.get("applicantCount"))
+    if detail_count > 0:
+        return detail_count
+    row_count = _safe_int(row.get("applicantCount"))
+    if row_count > 0:
+        return row_count
+    return len(students)
+
+
 def _format_lead_detail_answer(
     row: dict[str, Any],
     detail: dict[str, Any],
@@ -2642,9 +2659,7 @@ def _format_lead_detail_answer(
     )
     application_id = _first_text(detail, row, "applicationId", "application_id")
     application_status = _first_text(detail, row, "applicationStatus", "application_status")
-    applicant_count = _safe_int(detail.get("applicantCount")) or _safe_int(
-        row.get("applicantCount")
-    )
+    applicant_count = _lead_child_count(row, detail, students)
     payment_status = _first_text(detail, row, "latestPaymentStatus", "paymentStatus")
     payment_type = _first_text(detail, row, "latestPaymentType", "paymentType")
     payment_amount = detail.get("latestPaymentAmount", row.get("latestPaymentAmount"))

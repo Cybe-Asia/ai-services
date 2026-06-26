@@ -1464,24 +1464,37 @@ def test_owner_named_date_range_eoi_count_uses_date_filter(monkeypatch) -> None:
     assert "17 Juni 2026 - 19 Juni 2026" in result.answer
 
 
-def test_owner_named_lead_child_count_uses_admission_tool(monkeypatch) -> None:
+def test_owner_named_lead_child_count_uses_detail_truth(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
-        assert url == "http://admission-service/api/leads/v1/admin/leads"
         assert authorization == "Bearer test-token"
-        assert params == {"limit": "5", "offset": "0", "search": "arief nugraha"}
+        if url == "http://admission-service/api/leads/v1/admin/leads":
+            assert params == {"limit": "5", "offset": "0", "search": "arief nugraha"}
+            return {
+                "data": {
+                    "total": 1,
+                    "rows": [
+                        {
+                            "leadId": "LEAD-1",
+                            "parentName": "Arief Nugraha",
+                            "email": "arief@example.test",
+                            "school": "SCH-IISS",
+                            "leadStatus": "verified",
+                        }
+                    ],
+                }
+            }
+        assert url == "http://admission-service/api/leads/v1/admin/leads/LEAD-1"
+        assert params == {}
         return {
             "data": {
-                "total": 1,
-                "rows": [
-                    {
-                        "leadId": "LEAD-1",
-                        "parentName": "Arief Nugraha",
+                "detail": {
+                    "lead": {
+                        "parent_name": "Arief Nugraha",
                         "email": "arief@example.test",
-                        "school": "SCH-IISS",
-                        "leadStatus": "verified",
-                        "applicantCount": 2,
-                    }
-                ],
+                    },
+                    "applicantCount": 2,
+                },
+                "students": [],
             }
         }
 
