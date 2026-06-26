@@ -2944,18 +2944,86 @@ def _date_span_from_message(message: str, default_year: int) -> Optional[DateRan
         rf"(?:\s+(?P<year>\d{{2,4}}))?\b",
         message,
     )
-    if not same_month_match:
-        return None
+    if same_month_match:
+        year = _normalize_year(same_month_match.group("year"), default_year)
+        return _date_range_from_parts(
+            start_year=year,
+            start_month=MONTH_ALIASES[same_month_match.group("month")],
+            start_day=int(same_month_match.group("start")),
+            end_year=year,
+            end_month=MONTH_ALIASES[same_month_match.group("month")],
+            end_day=int(same_month_match.group("end")),
+            end_year_was_explicit=same_month_match.group("year") is not None,
+        )
 
-    year = _normalize_year(same_month_match.group("year"), default_year)
-    month = MONTH_ALIASES[same_month_match.group("month")]
-    start_day = int(same_month_match.group("start"))
-    end_day = int(same_month_match.group("end"))
-    start = _safe_date(year, month, start_day)
-    end = _safe_date(year, month, end_day)
+    day_month_match = re.search(
+        rf"\b(?:dari|from)?\s*(?:tanggal\s*)?"
+        rf"(?P<start_day>\d{{1,2}})\s+(?P<start_month>{month_names})"
+        rf"(?:\s+(?P<start_year>\d{{2,4}}))?\s*"
+        rf"(?:-|sampai|hingga|sd|s/d|to|until)\s*(?:tanggal\s*)?"
+        rf"(?P<end_day>\d{{1,2}})\s+(?P<end_month>{month_names})"
+        rf"(?:\s+(?P<end_year>\d{{2,4}}))?\b",
+        message,
+    )
+    if day_month_match:
+        end_year = _normalize_year(day_month_match.group("end_year"), default_year)
+        start_year = _normalize_year(day_month_match.group("start_year"), end_year)
+        return _date_range_from_parts(
+            start_year=start_year,
+            start_month=MONTH_ALIASES[day_month_match.group("start_month")],
+            start_day=int(day_month_match.group("start_day")),
+            end_year=end_year,
+            end_month=MONTH_ALIASES[day_month_match.group("end_month")],
+            end_day=int(day_month_match.group("end_day")),
+            end_year_was_explicit=day_month_match.group("end_year") is not None,
+        )
+
+    month_day_match = re.search(
+        rf"\b(?:from\s+)?(?P<start_month>{month_names})\s+"
+        rf"(?P<start_day>\d{{1,2}})(?:,?\s+(?P<start_year>\d{{2,4}}))?\s*"
+        rf"(?:-|to|until|sampai|hingga|sd|s/d)\s*"
+        rf"(?P<end_month>{month_names})\s+(?P<end_day>\d{{1,2}})"
+        rf"(?:,?\s+(?P<end_year>\d{{2,4}}))?\b",
+        message,
+    )
+    if month_day_match:
+        end_year = _normalize_year(month_day_match.group("end_year"), default_year)
+        start_year = _normalize_year(month_day_match.group("start_year"), end_year)
+        return _date_range_from_parts(
+            start_year=start_year,
+            start_month=MONTH_ALIASES[month_day_match.group("start_month")],
+            start_day=int(month_day_match.group("start_day")),
+            end_year=end_year,
+            end_month=MONTH_ALIASES[month_day_match.group("end_month")],
+            end_day=int(month_day_match.group("end_day")),
+            end_year_was_explicit=month_day_match.group("end_year") is not None,
+        )
+
+    return None
+
+
+def _date_range_from_parts(
+    *,
+    start_year: int,
+    start_month: int,
+    start_day: int,
+    end_year: int,
+    end_month: int,
+    end_day: int,
+    end_year_was_explicit: bool,
+) -> Optional[DateRange]:
+    start = _safe_date(start_year, start_month, start_day)
+    end = _safe_date(end_year, end_month, end_day)
+    if (
+        start is not None
+        and end is not None
+        and end < start
+        and not end_year_was_explicit
+        and end_month < start_month
+    ):
+        end = _safe_date(end_year + 1, end_month, end_day)
     if start is None or end is None or end < start:
         return None
-
     return _range_from_dates(
         start,
         end + timedelta(days=1),

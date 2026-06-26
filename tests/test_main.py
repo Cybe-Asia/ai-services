@@ -1336,6 +1336,39 @@ def test_owner_same_month_date_range_eoi_count_uses_date_filter(monkeypatch) -> 
     assert "1 Juni 2026 - 10 Juni 2026" in result.answer
 
 
+def test_owner_named_date_range_eoi_count_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 26, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-16T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+        return {"data": {"total": 8}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="ada berapa eoi dari 17 Juni sampai 19 Juni 2026?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "8 EOI" in result.answer
+    assert "17 Juni 2026 - 19 Juni 2026" in result.answer
+
+
 def test_owner_named_lead_child_count_uses_admission_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://admission-service/api/leads/v1/admin/leads"
@@ -1771,6 +1804,43 @@ def test_owner_payment_count_uses_date_filter(monkeypatch) -> None:
     assert result is not None
     assert "6 pembayaran" in result.answer
     assert "hari ini" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_review_count"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_english_payment_named_date_range_uses_date_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 26, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params["status"] == "pending_verification"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-16T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+        return {"data": {"total": 5}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="How many payments from June 17 to June 19 2026?",
+                actor_role=ActorRole.owner,
+                locale="en",
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "There are 5 payments pending verification" in result.answer
+    assert "June 17, 2026 to June 19, 2026" in result.answer
     assert result.tool_calls[0].name == "payment.admin_review_count"
     assert result.tool_calls[0].status == "ok"
 
