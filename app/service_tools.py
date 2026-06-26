@@ -23,6 +23,7 @@ INTENT_ADMISSION_LEAD_DETAIL = "admission_lead_detail"
 INTENT_ADMISSION_LEAD_CHILD_COUNT = "admission_lead_child_count"
 INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
+INTENT_PAYMENT_REVIEW_LIST = "payment_review_list"
 INTENT_PAYMENT_APPLICATION_FEE = "payment_application_fee_quote"
 INTENT_ADMISSIONS_PAYMENTS_REPORT = "admissions_payments_report"
 INTENT_OPERATIONS_BRIEF = "operations_brief"
@@ -300,6 +301,16 @@ async def answer_from_school_tools(
             intent.payment_status,
             language,
         )
+    if intent.name == INTENT_PAYMENT_REVIEW_LIST:
+        return await _payment_review_list(
+            settings,
+            authorization,
+            payload,
+            lowered,
+            date_range,
+            intent.payment_status,
+            language,
+        )
     if intent.name == INTENT_PAYMENT_APPLICATION_FEE:
         return await _payment_application_fee_quote(settings, authorization, lowered, language)
     if intent.name == INTENT_CURRENT_DATE:
@@ -318,6 +329,8 @@ def _deterministic_tool_intent(message: str) -> ToolIntent:
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
     if _asks_for_payment_application_fee(message):
         return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
+    if _asks_for_payment_review_list(message):
+        return ToolIntent(INTENT_PAYMENT_REVIEW_LIST, _payment_status_from_message(message))
     if _asks_for_eoi_count(message):
         return ToolIntent(INTENT_ADMISSION_EOI_COUNT)
     if _asks_for_admission_lead_identity(message):
@@ -346,11 +359,28 @@ def _contextual_tool_intent(
                 INTENT_PAYMENT_REVIEW_COUNT,
                 _payment_status_from_message(lowered_message),
             )
+        if last_tool == "payment.admin_reviews_list":
+            return ToolIntent(
+                INTENT_PAYMENT_REVIEW_LIST,
+                _payment_status_from_message(lowered_message),
+            )
 
     if _asks_for_contextual_report_export(lowered_message) and _history_has_reportable_tool_call(
         payload
     ):
         return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
+
+    if _asks_for_contextual_payment_review_list(lowered_message) and (
+        _history_has_tool_call(payload, "payment.admin_review_count")
+        or _history_has_tool_call(payload, "payment.admin_reviews_list")
+        or _history_has_tool_call(payload, "report.admissions_payments")
+    ):
+        context_status = _thread_context(payload).get("lastPaymentStatus")
+        return ToolIntent(
+            INTENT_PAYMENT_REVIEW_LIST,
+            _normalize_payment_status(context_status)
+            or _payment_status_from_message(lowered_message),
+        )
 
     if _asks_for_contextual_lead_child_identity(lowered_message) and _history_has_tool_call(
         payload,
@@ -392,6 +422,8 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "use admission_lead_students_list. "
         "If user asks count of transactions, finance checks, payments, invoices, or manual "
         "transfers, use payment_review_count. "
+        "If user asks who/list/detail of transactions, payments, invoices, manual transfers, "
+        "or payment proofs, use payment_review_list. "
         "If user asks to report/export/download/show EOI together with payment data, "
         "use admissions_payments_report. "
         "If user asks for daily brief, owner summary, operations summary, priorities, "
@@ -457,6 +489,11 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
             body.get("paymentStatus") or body.get("payment_status") or body.get("status")
         )
         return ToolIntent(INTENT_PAYMENT_REVIEW_COUNT, payment_status)
+    if intent == INTENT_PAYMENT_REVIEW_LIST:
+        payment_status = _normalize_payment_status(
+            body.get("paymentStatus") or body.get("payment_status") or body.get("status")
+        )
+        return ToolIntent(INTENT_PAYMENT_REVIEW_LIST, payment_status)
     if intent == INTENT_PAYMENT_APPLICATION_FEE:
         return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
     if intent == INTENT_ADMISSIONS_PAYMENTS_REPORT:
@@ -499,6 +536,11 @@ def _normalize_intent(value: Any) -> str:
         "payment_admin_review_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_pending_count": INTENT_PAYMENT_REVIEW_COUNT,
+        INTENT_PAYMENT_REVIEW_LIST: INTENT_PAYMENT_REVIEW_LIST,
+        "payment_admin_reviews_list": INTENT_PAYMENT_REVIEW_LIST,
+        "payment_list": INTENT_PAYMENT_REVIEW_LIST,
+        "payment_review_list": INTENT_PAYMENT_REVIEW_LIST,
+        "payment_queue": INTENT_PAYMENT_REVIEW_LIST,
         INTENT_PAYMENT_APPLICATION_FEE: INTENT_PAYMENT_APPLICATION_FEE,
         "payment_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
         "application_fee_quote": INTENT_PAYMENT_APPLICATION_FEE,
@@ -998,6 +1040,80 @@ async def _payment_review_count(
         else f"Ada {total} pembayaran {label}{scope} di payment-service."
     )
     answer = _with_next_actions(answer, language, _next_actions("payment_count", language))
+    return ToolAnswer(
+        answer=answer,
+        sources=[SourceRef(kind="service", title="payment-service admin reviews", reference=None)],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+async def _payment_review_list(
+    settings: Settings,
+    authorization: Optional[str],
+    payload: ChatRequest,
+    lowered_message: str,
+    date_range: Optional[DateRange] = None,
+    status_override: Optional[str] = None,
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "payment.admin_reviews_list"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "daftar pembayaran")
+
+    status = status_override or _payment_status_from_message(lowered_message)
+    effective_date_range = None if _asks_for_all_time(lowered_message) else date_range
+    if effective_date_range is None and not _asks_for_all_time(lowered_message):
+        effective_date_range = _date_range_from_recent_history(payload)
+
+    url = _join_url(settings.payment_service_url, "/api/v1/payments/admin/reviews")
+    try:
+        body = await _get_json(
+            url,
+            authorization,
+            _payment_review_params(
+                status=status,
+                limit=5,
+                offset=0,
+                date_range=effective_date_range,
+            ),
+        )
+        rows, total = _extract_payment_review_rows(body)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil daftar pembayaran dari payment-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil daftar pembayaran dari payment-service.",
+        )
+
+    label = _payment_status_label(status, language)
+    scope = _date_scope(effective_date_range, language)
+    if total == 0 or not rows:
+        answer = (
+            f"No payments are {label}{scope} in payment-service."
+            if language == "en"
+            else f"Belum ada pembayaran {label}{scope} di payment-service."
+        )
+    else:
+        shown = min(len(rows), 5)
+        lines = [
+            (
+                f"There are {total} payments {label}{scope}. Showing the latest {shown}:"
+                if language == "en"
+                else f"Ada {total} pembayaran {label}{scope}. Saya tampilkan {shown} yang terbaru:"
+            ),
+            "",
+            *_preview_payment_lines(rows, language),
+        ]
+        answer = "\n".join(lines)
+
+    answer = _with_next_actions(answer, language, _next_actions("payment_list", language))
     return ToolAnswer(
         answer=answer,
         sources=[SourceRef(kind="service", title="payment-service admin reviews", reference=None)],
@@ -3215,6 +3331,28 @@ def _asks_for_contextual_lead_child_identity(message: str) -> bool:
     return any(term == message.strip() or term in message for term in followup_terms)
 
 
+def _asks_for_contextual_payment_review_list(message: str) -> bool:
+    stripped = message.strip()
+    followup_terms = (
+        "siapa",
+        "siapa aja",
+        "siapa saja",
+        "yang mana",
+        "mana aja",
+        "list",
+        "daftar",
+        "tampilkan",
+        "detail",
+        "detailnya",
+        "show",
+        "show details",
+        "who",
+        "which",
+        "which ones",
+    )
+    return any(term == stripped or term in message for term in followup_terms)
+
+
 def _thread_context(payload: ChatRequest) -> dict[str, Any]:
     context = payload.metadata.get(THREAD_CONTEXT_METADATA_KEY)
     return _compact_thread_context(context) if isinstance(context, dict) else {}
@@ -3315,6 +3453,7 @@ def _reportable_tool_names() -> set[str]:
         "admission.admin_lead_child_count",
         "admission.admin_lead_students_list",
         "payment.admin_review_count",
+        "payment.admin_reviews_list",
         "payment.application_fee_quote",
     }
 
@@ -3593,6 +3732,37 @@ def _asks_for_payment_review_count(message: str) -> bool:
     )
 
 
+def _asks_for_payment_review_list(message: str) -> bool:
+    payment_terms = (
+        "payment",
+        "payments",
+        "pembayaran",
+        "tagihan",
+        "invoice",
+        "manual transfer",
+        "bukti bayar",
+        "bukti pembayaran",
+    )
+    list_terms = (
+        "siapa",
+        "siapa aja",
+        "siapa saja",
+        "yang mana",
+        "mana aja",
+        "list",
+        "daftar",
+        "tampilkan",
+        "show",
+        "detail",
+        "details",
+        "who",
+        "which",
+    )
+    if not any(term in message for term in payment_terms):
+        return False
+    return any(term in message for term in list_terms)
+
+
 def _asks_for_payment_application_fee(message: str) -> bool:
     price_terms = ("harga", "biaya", "fee", "tarif", "cost", "price")
     admission_terms = (
@@ -3774,8 +3944,14 @@ def _next_actions(kind: str, language: str) -> list[str]:
             ],
             "payment_count": [
                 "Ask for the EOI + payment report to inspect the queue.",
+                "Ask who is in the payment queue to see the latest review rows.",
                 "Ask for a specific date, for example yesterday or 19 days ago.",
                 "Ask for application fee pricing if the parent needs payment guidance.",
+            ],
+            "payment_list": [
+                "Ask for the EOI + payment report to download this queue.",
+                "Ask to rerun this list for today, yesterday, or a custom date.",
+                "Ask for application fee pricing if you need to reply to a parent.",
             ],
             "fee_quote": [
                 "Ask for one school only if you need a shorter parent reply.",
@@ -3816,8 +3992,14 @@ def _next_actions(kind: str, language: str) -> list[str]:
         ],
         "payment_count": [
             "Minta laporan EOI + pembayaran untuk cek antrian.",
+            "Tanya siapa yang masuk antrian payment untuk melihat baris terbaru.",
             "Tanya periode spesifik, misalnya kemarin atau 19 hari lalu.",
             "Tanya biaya pendaftaran kalau parent butuh arahan payment.",
+        ],
+        "payment_list": [
+            "Minta laporan EOI + pembayaran untuk download antrian ini.",
+            "Jalankan ulang daftar ini untuk hari ini, kemarin, atau tanggal tertentu.",
+            "Tanya biaya pendaftaran kalau perlu membalas parent.",
         ],
         "fee_quote": [
             "Sebut satu sekolah saja kalau butuh jawaban singkat untuk parent.",

@@ -1754,6 +1754,122 @@ def test_owner_casual_today_payment_question_uses_payment_tool(monkeypatch) -> N
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_payment_identity_prompt_lists_review_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params["status"] == "pending_verification"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-17T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "paymentId": "PAY-1",
+                        "parentName": "Arief Nugraha",
+                        "parentEmail": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "paymentType": "application_fee",
+                        "status": "pending_verification",
+                        "amount": 1000000,
+                        "currency": "IDR",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="siapa aja yang sudah sampai payment hari ini?",
+                actor_role=ActorRole.owner,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Ada 1 pembayaran yang menunggu verifikasi hari ini" in result.answer
+    assert "| # | Parent | Email | School | Type | Status | Amount |" in result.answer
+    assert "| 1 | Arief Nugraha | arief@example.test | SCH-IISS | application_fee" in result.answer
+    assert "Rp 1.000.000" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_reviews_list"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_contextual_payment_identity_followup_keeps_recent_date(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 18, 12, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://payment-service/api/v1/payments/admin/reviews"
+        assert authorization == "Bearer test-token"
+        assert params["status"] == "pending_verification"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-17T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-18T16:59:59.999000+00:00"
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "paymentId": "PAY-1",
+                        "parentName": "Arief Nugraha",
+                        "parentEmail": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "paymentType": "application_fee",
+                        "status": "pending_verification",
+                        "amount": 1000000,
+                        "currency": "IDR",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="siapa aja?",
+                actor_role=ActorRole.owner,
+                history=[
+                    {"role": "user", "content": "ada payment gak hari ini?"},
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 pembayaran yang menunggu verifikasi hari ini.",
+                        "toolCalls": [
+                            {"name": "payment.admin_review_count", "status": "ok"}
+                        ],
+                    },
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha" in result.answer
+    assert "hari ini" in result.answer
+    assert result.tool_calls[0].name == "payment.admin_reviews_list"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_underpaid_payment_count_uses_underpaid_status(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://payment-service/api/v1/payments/admin/reviews"
