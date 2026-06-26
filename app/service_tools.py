@@ -241,6 +241,20 @@ async def answer_from_school_tools(
 ) -> Optional[ToolAnswer]:
     lowered = payload.message.casefold()
     language = _answer_language(payload, lowered)
+    if (
+        payload.actor_role in {ActorRole.owner, ActorRole.admin}
+        and payload.metadata.get("skipContextTranslation") is not True
+        and _asks_for_context_translation(lowered)
+    ):
+        translated = await _context_translation_answer(
+            payload,
+            settings,
+            authorization,
+            lowered,
+        )
+        if translated is not None:
+            return translated
+
     if payload.actor_role in {ActorRole.owner, ActorRole.admin} and _asks_for_operations_brief(
         lowered
     ):
@@ -4076,6 +4090,8 @@ def _format_money(amount: Any, currency: Any) -> str:
 def _answer_language(payload: ChatRequest, lowered_message: str) -> str:
     if payload.locale.casefold().startswith("en"):
         return "en"
+    if _translation_target_language(lowered_message, payload.locale) == "en":
+        return "en"
     english_terms = (
         "how many",
         "how much",
@@ -4106,6 +4122,105 @@ def _answer_language(payload: ChatRequest, lowered_message: str) -> str:
         "students",
     )
     return "en" if any(term in lowered_message for term in english_terms) else "id"
+
+
+async def _context_translation_answer(
+    payload: ChatRequest,
+    settings: Settings,
+    authorization: Optional[str],
+    lowered_message: str,
+) -> Optional[ToolAnswer]:
+    previous_message = _previous_user_message_for_translation(payload)
+    target_language = _translation_target_language(lowered_message, payload.locale)
+    language = "en" if target_language == "en" else "id"
+    if not previous_message:
+        answer = (
+            "I need a previous question in this thread before I can translate it."
+            if language == "en"
+            else "Saya perlu pertanyaan sebelumnya di thread ini sebelum bisa menerjemahkan."
+        )
+        return ToolAnswer(
+            answer=answer,
+            sources=[],
+            tool_calls=[ToolCallRef(name="assistant.context_translation", status="not_found")],
+        )
+
+    metadata = dict(payload.metadata)
+    metadata["skipContextTranslation"] = True
+    translated_payload = payload.model_copy(
+        update={
+            "message": previous_message,
+            "locale": target_language,
+            "metadata": metadata,
+        }
+    )
+    translated = await answer_from_school_tools(translated_payload, settings, authorization)
+    if translated is None:
+        answer = (
+            "I can translate operational answers after the original question is handled by an "
+            "available school-data tool."
+            if language == "en"
+            else (
+                "Saya bisa menerjemahkan jawaban operasional setelah pertanyaan aslinya "
+                "ditangani oleh tool data sekolah yang tersedia."
+            )
+        )
+        return ToolAnswer(
+            answer=answer,
+            sources=[],
+            tool_calls=[ToolCallRef(name="assistant.context_translation", status="not_configured")],
+        )
+    return translated
+
+
+def _previous_user_message_for_translation(payload: ChatRequest) -> str:
+    for turn in reversed(payload.history[-12:]):
+        if turn.role != "user":
+            continue
+        content = _clean_text(turn.content)
+        if content and not _asks_for_context_translation(content.casefold()):
+            return content
+    return ""
+
+
+def _asks_for_context_translation(message: str) -> bool:
+    terms = (
+        "translate",
+        "translation",
+        "terjemah",
+        "terjemahkan",
+        "terjemahin",
+        "bahasa inggris",
+        "in english",
+        "to english",
+        "ke english",
+        "ke inggris",
+        "bahasa indonesia",
+        "to indonesian",
+        "ke indonesia",
+    )
+    return any(term in message for term in terms)
+
+
+def _translation_target_language(message: str, locale: str) -> str:
+    indonesian_terms = (
+        "bahasa indonesia",
+        "indonesian",
+        "ke indonesia",
+        "to indonesian",
+    )
+    if any(term in message for term in indonesian_terms):
+        return "id"
+    english_terms = (
+        "english",
+        "inggris",
+        "in english",
+        "to english",
+        "ke english",
+    )
+    if any(term in message for term in english_terms):
+        return "en"
+    return "en" if locale.casefold().startswith("en") else "id"
 
 
 def _with_next_actions(answer: str, language: str, actions: list[str]) -> str:

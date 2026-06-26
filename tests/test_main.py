@@ -2249,6 +2249,106 @@ def test_owner_english_admission_price_returns_english(monkeypatch) -> None:
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_translate_previous_fee_answer_reruns_tool_in_english(monkeypatch) -> None:
+    calls = []
+
+    async def fake_get_json(url, authorization, params):
+        calls.append(url.rsplit("/", 1)[-1])
+        assert authorization == "Bearer test-token"
+        assert params == {"payment_type": "application_fee"}
+        school_code = url.rsplit("/", 1)[-1]
+        return {
+            "data": {
+                "feeStructureId": f"FEE-{school_code}",
+                "schoolCode": school_code,
+                "paymentType": "application_fee",
+                "amount": 1000000,
+                "currency": "IDR",
+                "status": "active",
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="now translate in english",
+                actor_role=ActorRole.admin,
+                history=[
+                    {"role": "user", "content": "berapa harga application fee kita"},
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "Biaya pendaftaran saat ini: IIHS: Rp 1.000.000, "
+                            "IISS: Rp 1.000.000, IIBS: Rp 1.000.000."
+                        ),
+                        "toolCalls": [
+                            {"name": "payment.application_fee_quote", "status": "ok"}
+                        ],
+                    },
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert (
+        "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, "
+        "IIBS: Rp 1.000.000."
+    ) in result.answer
+    assert "Next actions:" in result.answer
+    assert calls == ["IIHS", "IISS", "IIBS"]
+    assert result.tool_calls[0].name == "payment.application_fee_quote"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_translate_previous_eoi_count_keeps_date_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "1"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+        return {"data": {"total": 3}}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="translate to English",
+                actor_role=ActorRole.admin,
+                history=[
+                    {"role": "user", "content": "ada berapa eoi hari ini?"},
+                    {
+                        "role": "assistant",
+                        "content": "Ada 3 EOI terdaftar hari ini di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    },
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "There are 3 EOIs registered on June 19, 2026" in result.answer
+    assert "Next actions:" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_count"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_admissions_payment_report_returns_export_links(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert authorization == "Bearer test-token"
