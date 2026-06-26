@@ -862,6 +862,63 @@ def test_owner_registered_eoi_identity_prompt_uses_leads_list_tool(monkeypatch) 
     assert result.tool_calls[0].status == "ok"
 
 
+def test_owner_eoi_identity_followup_keeps_recent_date(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "5"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+        return {
+            "data": {
+                "total": 1,
+                "rows": [
+                    {
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "leadStatus": "verified",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="Yang daftar eoi",
+                actor_role=ActorRole.admin,
+                history=[
+                    {"role": "user", "content": "Ada berapa yang daftar hari ini?"},
+                    {
+                        "role": "assistant",
+                        "content": "Ada 1 EOI terdaftar hari ini di admission-service.",
+                        "toolCalls": [
+                            {"name": "admission.admin_leads_count", "status": "ok"}
+                        ],
+                    },
+                ],
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Ada 1 EOI hari ini" in result.answer
+    assert "Arief Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_leads_list"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_contextual_detail_followup_uses_leads_list_tool(monkeypatch) -> None:
     class ExplodingLlmClient:
         def __init__(self, settings):

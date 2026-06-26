@@ -273,7 +273,12 @@ async def answer_from_school_tools(
     if intent.name == INTENT_ADMISSION_EOI_COUNT:
         return await _admission_eoi_count(settings, authorization, date_range, language)
     if intent.name == INTENT_ADMISSION_LEADS_LIST:
-        return await _admission_leads_list(settings, authorization, date_range, language)
+        return await _admission_leads_list(
+            settings,
+            authorization,
+            _lead_list_date_range(payload, lowered, date_range),
+            language,
+        )
     if intent.name == INTENT_ADMISSION_LEAD_DETAIL:
         return await _admission_lead_detail(settings, authorization, payload, lowered, language)
     if intent.name == INTENT_ADMISSION_LEAD_CHILD_COUNT:
@@ -1855,6 +1860,40 @@ def _date_range_from_recent_history(payload: Optional[ChatRequest]) -> Optional[
         if date_range is not None:
             return date_range
     return None
+
+
+def _lead_list_date_range(
+    payload: ChatRequest,
+    lowered_message: str,
+    date_range: Optional[DateRange],
+) -> Optional[DateRange]:
+    if date_range is not None or _asks_for_all_time(lowered_message):
+        return date_range
+    if not _should_reuse_recent_date_for_lead_list(lowered_message):
+        return None
+    return _date_range_from_recent_history(payload)
+
+
+def _should_reuse_recent_date_for_lead_list(message: str) -> bool:
+    if any(term in message for term in ("sekarang", "now", "saat ini", "current", "overall")):
+        return False
+    followup_terms = (
+        "siapa",
+        "siapa aja",
+        "siapa saja",
+        "yang daftar",
+        "yang mendaftar",
+        "yang terdaftar",
+        "list",
+        "daftar eoi",
+        "daftar lead",
+        "tampilkan",
+        "lihat",
+        "show",
+        "who",
+        "which",
+    )
+    return any(term in message for term in followup_terms)
 
 
 def _date_range_from_query(date_from: Optional[str], date_to: Optional[str]) -> Optional[DateRange]:
