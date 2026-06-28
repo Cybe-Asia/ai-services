@@ -49,9 +49,32 @@ async def resolve_admin_context(
             detail="Admin session validation failed",
         )
 
+    roles = data.get("roles") if isinstance(data.get("roles"), list) else []
+    normalized_roles = {
+        str(role).casefold().strip().replace("-", "_") for role in roles if str(role).strip()
+    }
     is_owner = data.get("isOwner") is True
     is_admin = data.get("isAdmin") is True
-    if not (is_owner or is_admin):
+    is_staff = (
+        data.get("isAdmissionsStaff") is True
+        or data.get("isAdmissionsManager") is True
+        or data.get("isMarketingStaff") is True
+        or data.get("isMarketingManager") is True
+        or data.get("isFinanceApprover") is True
+        or bool(
+            normalized_roles
+            & {
+                "admissions_admin",
+                "admissions_manager",
+                "admissions_staff",
+                "marketing_manager",
+                "marketing_staff",
+                "finance_admin",
+                "finance_approver",
+            }
+        )
+    )
+    if not (is_owner or is_admin or is_staff):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
