@@ -466,8 +466,7 @@ def test_admin_contextual_detail_after_list_uses_stored_lead_query(monkeypatch) 
     assert first.status_code == 200
     conversation_id = first.json()["conversationId"]
     assert (
-        thread_store._MEMORY_THREADS[conversation_id]["context"]["lastLeadQuery"]
-        == "Arief Nugraha"
+        thread_store._MEMORY_THREADS[conversation_id]["context"]["lastLeadQuery"] == "Arief Nugraha"
     )
 
     second = client.post(
@@ -597,9 +596,7 @@ def test_admin_chat_streams_contextual_detail_followup(monkeypatch) -> None:
     streamed_text = "".join(data["text"] for event, data in events if event == "delta")
     assert "Detail EOI lengkap untuk Arief Nugraha:" in streamed_text
     assert "Aisha Nugraha" in streamed_text
-    assert events[-1][1]["toolCalls"] == [
-        {"name": "admission.admin_lead_detail", "status": "ok"}
-    ]
+    assert events[-1][1]["toolCalls"] == [{"name": "admission.admin_lead_detail", "status": "ok"}]
 
 
 def test_public_chat_streams_llm_deltas(monkeypatch) -> None:
@@ -741,6 +738,101 @@ def test_owner_eoi_count_reports_expired_admin_session(monkeypatch) -> None:
     assert result.tool_calls[0].status == "auth_required"
 
 
+def test_owner_appointments_list_uses_admission_tool(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_tools,
+        "_now_jakarta",
+        lambda: datetime(2026, 6, 19, 8, 0, tzinfo=service_tools.SCHOOL_TIME_ZONE),
+    )
+
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/appointments"
+        assert authorization == "Bearer test-token"
+        assert params["limit"] == "20"
+        assert params["offset"] == "0"
+        assert params["dateFrom"] == "2026-06-18T17:00:00+00:00"
+        assert params["dateTo"] == "2026-06-19T16:59:59.999000+00:00"
+        return {
+            "data": [
+                {
+                    "appointmentId": "APPT-1",
+                    "leadId": "LEAD-1",
+                    "parentName": "Arief Nugraha",
+                    "staffEmail": "staff@example.test",
+                    "appointmentType": "consultation",
+                    "status": "scheduled",
+                    "startsAt": "2026-06-19T03:00:00Z",
+                    "endsAt": "2026-06-19T03:30:00Z",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="jadwal appointment hari ini siapa saja?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha" in result.answer
+    assert result.tool_calls[0].name == "admission.admin_appointments_list"
+    assert result.tool_calls[0].status == "ok"
+
+
+def test_owner_paid_leads_without_appointment_uses_visibility_aware_leads_tool(
+    monkeypatch,
+) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads"
+        assert authorization == "Bearer test-token"
+        assert params == {"limit": "50", "offset": "0", "status": "paid"}
+        return {
+            "data": {
+                "total": 2,
+                "rows": [
+                    {
+                        "parentName": "Arief Nugraha",
+                        "email": "arief@example.test",
+                        "school": "SCH-IISS",
+                        "leadStatus": "paid",
+                        "hasActiveAppointment": False,
+                    },
+                    {
+                        "parentName": "Budi Santoso",
+                        "email": "budi@example.test",
+                        "school": "SCH-IIHS",
+                        "leadStatus": "paid",
+                        "hasActiveAppointment": True,
+                    },
+                ],
+            }
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="which paid leads have no appointment booked?",
+                actor_role=ActorRole.admin,
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Arief Nugraha" in result.answer
+    assert "Budi Santoso" not in result.answer
+    assert result.tool_calls[0].name == "admission.admin_paid_leads_without_appointment"
+    assert result.tool_calls[0].status == "ok"
+
+
 def test_owner_registration_count_uses_admission_tool(monkeypatch) -> None:
     async def fake_get_json(url, authorization, params):
         assert url == "http://admission-service/api/leads/v1/admin/leads"
@@ -830,9 +922,7 @@ def test_owner_contextual_lead_identity_followup_uses_leads_list_tool(monkeypatc
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     }
                 ],
             ),
@@ -925,9 +1015,7 @@ def test_owner_eoi_identity_followup_keeps_recent_date(monkeypatch) -> None:
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar hari ini di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     },
                 ],
             ),
@@ -1005,9 +1093,7 @@ def test_owner_contextual_detail_followup_opens_single_lead_detail(monkeypatch) 
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     }
                 ],
             ),
@@ -1082,9 +1168,7 @@ def test_owner_contextual_detail_uses_structured_thread_context_and_recent_date(
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar hari ini di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     },
                 ],
                 metadata={
@@ -1261,9 +1345,7 @@ def test_owner_contextual_relative_days_ago_eoi_count_uses_date_filter(monkeypat
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     }
                 ],
             ),
@@ -1303,9 +1385,7 @@ def test_owner_contextual_last_month_eoi_count_uses_date_filter(monkeypatch) -> 
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     }
                 ],
             ),
@@ -1575,9 +1655,7 @@ def test_owner_contextual_child_identity_followup_uses_detail_tool(monkeypatch) 
                     {
                         "role": "assistant",
                         "content": "Arief Nugraha mendaftarkan 2 anak di aplikasi.",
-                        "toolCalls": [
-                            {"name": "admission.admin_lead_child_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_lead_child_count", "status": "ok"}],
                     }
                 ],
             ),
@@ -1688,9 +1766,7 @@ def test_owner_contextual_lead_detail_returns_full_fields(monkeypatch) -> None:
                     {
                         "role": "assistant",
                         "content": "1. Arief Nugraha (arief@example.test)",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_list", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_list", "status": "ok"}],
                     }
                 ],
             ),
@@ -1704,8 +1780,7 @@ def test_owner_contextual_lead_detail_returns_full_fields(monkeypatch) -> None:
     assert "- Email: arief@example.test" in result.answer
     assert "- Mobile/WhatsApp: +628123456789" in result.answer
     assert (
-        "- Payment terakhir: pending_verification; application_fee; Rp 1.000.000"
-        in result.answer
+        "- Payment terakhir: pending_verification; application_fee; Rp 1.000.000" in result.answer
     )
     assert "1. Aisha Nugraha" in result.answer
     assert "tanggal lahir: 2019-05-19" in result.answer
@@ -1765,9 +1840,7 @@ def test_owner_contextual_detail_can_use_ordinal_from_previous_list(monkeypatch)
                             "1. Arief Nugraha (arief@example.test)\n"
                             "2. Bima Santoso (bima@example.test)"
                         ),
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_list", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_list", "status": "ok"}],
                     }
                 ],
             ),
@@ -2141,9 +2214,7 @@ def test_owner_contextual_payment_identity_followup_keeps_recent_date(monkeypatc
                     {
                         "role": "assistant",
                         "content": "Ada 1 pembayaran yang menunggu verifikasi hari ini.",
-                        "toolCalls": [
-                            {"name": "payment.admin_review_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "payment.admin_review_count", "status": "ok"}],
                     },
                 ],
             ),
@@ -2219,9 +2290,7 @@ def test_owner_contextual_payment_detail_followup_uses_review_row(monkeypatch) -
                             "| 1 | Arief Nugraha | arief@example.test | SCH-IISS | "
                             "application_fee | pending_verification | Rp 1.000.000 |"
                         ),
-                        "toolCalls": [
-                            {"name": "payment.admin_reviews_list", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "payment.admin_reviews_list", "status": "ok"}],
                     },
                 ],
             ),
@@ -2286,9 +2355,7 @@ def test_owner_contextual_payment_detail_followup_keeps_recent_status(monkeypatc
                             "| 1 | Bima Santoso | bima@example.test | SCH-IIHS | "
                             "application_fee | underpaid | Rp 1.000.000 |"
                         ),
-                        "toolCalls": [
-                            {"name": "payment.admin_reviews_list", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "payment.admin_reviews_list", "status": "ok"}],
                     },
                 ],
             ),
@@ -2501,8 +2568,7 @@ def test_owner_english_admission_price_returns_english(monkeypatch) -> None:
 
     assert result is not None
     assert (
-        "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, "
-        "IIBS: Rp 1.000.000."
+        "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, " "IIBS: Rp 1.000.000."
     ) in result.answer
     assert "Next actions:" in result.answer
     assert result.tool_calls[0].name == "payment.application_fee_quote"
@@ -2542,9 +2608,7 @@ def test_owner_translate_previous_fee_answer_reruns_tool_in_english(monkeypatch)
                             "Biaya pendaftaran saat ini: IIHS: Rp 1.000.000, "
                             "IISS: Rp 1.000.000, IIBS: Rp 1.000.000."
                         ),
-                        "toolCalls": [
-                            {"name": "payment.application_fee_quote", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "payment.application_fee_quote", "status": "ok"}],
                     },
                 ],
             ),
@@ -2555,8 +2619,7 @@ def test_owner_translate_previous_fee_answer_reruns_tool_in_english(monkeypatch)
 
     assert result is not None
     assert (
-        "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, "
-        "IIBS: Rp 1.000.000."
+        "Current application fee: IIHS: Rp 1.000.000, IISS: Rp 1.000.000, " "IIBS: Rp 1.000.000."
     ) in result.answer
     assert "Next actions:" in result.answer
     assert calls == ["IIHS", "IISS", "IIBS"]
@@ -2591,9 +2654,7 @@ def test_owner_translate_previous_eoi_count_keeps_date_context(monkeypatch) -> N
                     {
                         "role": "assistant",
                         "content": "Ada 3 EOI terdaftar hari ini di admission-service.",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     },
                 ],
             ),
@@ -2675,8 +2736,7 @@ def test_owner_admissions_payment_report_returns_export_links(monkeypatch) -> No
     assert "EOI rows: 1 total" in result.answer
     assert "| # | Parent | Email | School | Lead status | Payment |" in result.answer
     assert (
-        "| 1 | Arief Nugraha | arief@example.test | SCH-IISS | verified | "
-        "pending_verification |"
+        "| 1 | Arief Nugraha | arief@example.test | SCH-IISS | verified | " "pending_verification |"
     ) in result.answer
     assert "| # | Parent | Email | School | Type | Status | Amount |" in result.answer
     assert [source.kind for source in result.sources] == ["file", "file", "file", "file"]
@@ -2745,9 +2805,7 @@ def test_owner_contextual_pdf_export_uses_report_tool_and_recent_date(monkeypatc
                     {
                         "role": "assistant",
                         "content": "Ada 1 EOI terdaftar kemarin (18 Juni 2026).",
-                        "toolCalls": [
-                            {"name": "admission.admin_leads_count", "status": "ok"}
-                        ],
+                        "toolCalls": [{"name": "admission.admin_leads_count", "status": "ok"}],
                     },
                 ],
             ),

@@ -22,6 +22,8 @@ INTENT_ADMISSION_LEADS_LIST = "admission_leads_list"
 INTENT_ADMISSION_LEAD_DETAIL = "admission_lead_detail"
 INTENT_ADMISSION_LEAD_CHILD_COUNT = "admission_lead_child_count"
 INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
+INTENT_ADMISSION_APPOINTMENTS_LIST = "admission_appointments_list"
+INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT = "admission_paid_leads_without_appointment"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 INTENT_PAYMENT_REVIEW_LIST = "payment_review_list"
 INTENT_PAYMENT_REVIEW_DETAIL = "payment_review_detail"
@@ -312,6 +314,15 @@ async def answer_from_school_tools(
             lowered,
             language,
         )
+    if intent.name == INTENT_ADMISSION_APPOINTMENTS_LIST:
+        return await _admission_appointments_list(settings, authorization, date_range, language)
+    if intent.name == INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT:
+        return await _admission_paid_leads_without_appointment(
+            settings,
+            authorization,
+            date_range,
+            language,
+        )
     if intent.name == INTENT_PAYMENT_REVIEW_COUNT:
         return await _payment_review_count(
             settings,
@@ -359,6 +370,10 @@ def _deterministic_tool_intent(message: str) -> ToolIntent:
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
     if _asks_for_payment_application_fee(message):
         return ToolIntent(INTENT_PAYMENT_APPLICATION_FEE)
+    if _asks_for_paid_leads_without_appointment(message):
+        return ToolIntent(INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT)
+    if _asks_for_appointment_list(message):
+        return ToolIntent(INTENT_ADMISSION_APPOINTMENTS_LIST)
     if _asks_for_payment_review_detail(message):
         return ToolIntent(INTENT_PAYMENT_REVIEW_DETAIL, _payment_status_from_message(message))
     if _asks_for_payment_review_list(message):
@@ -463,6 +478,10 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "transfers, use payment_review_count. "
         "If user asks who/list/detail of transactions, payments, invoices, manual transfers, "
         "or payment proofs, use payment_review_list. "
+        "If user asks appointment, schedule, calendar, booking, interview, consultation, "
+        "campus tour, or staff availability lists, use admission_appointments_list. "
+        "If user asks paid leads or paid EOIs without an appointment/booking/schedule, "
+        "use admission_paid_leads_without_appointment. "
         "If user asks full details of a specific payment row, use payment_review_detail. "
         "If user asks to report/export/download/show EOI together with payment data, "
         "use admissions_payments_report. "
@@ -475,6 +494,9 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         '{"intent":"admission_lead_child_count"}. '
         'Example: "berapa transaksi yang masih perlu dicek finance?" => '
         '{"intent":"payment_review_count","paymentStatus":"pending_verification"}. '
+        'Example: "which paid leads have no appointment booked?" => '
+        '{"intent":"admission_paid_leads_without_appointment"}. '
+        'Example: "jadwal appointment hari ini" => {"intent":"admission_appointments_list"}. '
         'Example: "export EOI and payment this month" => '
         '{"intent":"admissions_payments_report"}. '
         'Example: "briefing owner hari ini" => {"intent":"operations_brief"}. '
@@ -524,6 +546,10 @@ def _parse_tool_intent(raw_intent: Optional[str]) -> ToolIntent:
         return ToolIntent(INTENT_ADMISSION_LEAD_CHILD_COUNT)
     if intent == INTENT_ADMISSION_LEAD_STUDENTS_LIST:
         return ToolIntent(INTENT_ADMISSION_LEAD_STUDENTS_LIST)
+    if intent == INTENT_ADMISSION_APPOINTMENTS_LIST:
+        return ToolIntent(INTENT_ADMISSION_APPOINTMENTS_LIST)
+    if intent == INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT:
+        return ToolIntent(INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT)
     if intent == INTENT_PAYMENT_REVIEW_COUNT:
         payment_status = _normalize_payment_status(
             body.get("paymentStatus") or body.get("payment_status") or body.get("status")
@@ -577,6 +603,19 @@ def _normalize_intent(value: Any) -> str:
         "admission_lead_child_list": INTENT_ADMISSION_LEAD_STUDENTS_LIST,
         "lead_child_list": INTENT_ADMISSION_LEAD_STUDENTS_LIST,
         "lead_student_list": INTENT_ADMISSION_LEAD_STUDENTS_LIST,
+        INTENT_ADMISSION_APPOINTMENTS_LIST: INTENT_ADMISSION_APPOINTMENTS_LIST,
+        "admission_admin_appointments_list": INTENT_ADMISSION_APPOINTMENTS_LIST,
+        "appointment_list": INTENT_ADMISSION_APPOINTMENTS_LIST,
+        "appointments_list": INTENT_ADMISSION_APPOINTMENTS_LIST,
+        "calendar_list": INTENT_ADMISSION_APPOINTMENTS_LIST,
+        "booking_list": INTENT_ADMISSION_APPOINTMENTS_LIST,
+        INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT: (
+            INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT
+        ),
+        "admission_paid_without_appointment": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
+        "paid_leads_no_appointment": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
+        "paid_leads_without_booking": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
+        "paid_eoi_without_appointment": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
         INTENT_PAYMENT_REVIEW_COUNT: INTENT_PAYMENT_REVIEW_COUNT,
         "payment_admin_review_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_count": INTENT_PAYMENT_REVIEW_COUNT,
@@ -999,6 +1038,98 @@ async def _admission_lead_students_list(
         sources=[
             SourceRef(kind="service", title="admission-service admin lead detail", reference=None)
         ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+async def _admission_appointments_list(
+    settings: Settings,
+    authorization: Optional[str],
+    date_range: Optional[DateRange] = None,
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "admission.admin_appointments_list"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "jadwal appointment admissions")
+
+    try:
+        rows = await _fetch_appointment_rows(
+            settings,
+            authorization,
+            limit=20,
+            offset=0,
+            date_range=date_range,
+        )
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil jadwal appointment dari admission-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengambil jadwal appointment dari admission-service.",
+        )
+
+    answer = _format_appointments_list_answer(rows, date_range, language)
+    answer = _with_next_actions(answer, language, _next_actions("appointments", language))
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service admin appointments", reference=None)
+        ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok")],
+    )
+
+
+async def _admission_paid_leads_without_appointment(
+    settings: Settings,
+    authorization: Optional[str],
+    date_range: Optional[DateRange] = None,
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "admission.admin_paid_leads_without_appointment"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "lead paid tanpa appointment aktif")
+
+    try:
+        rows, total = await _fetch_lead_rows(
+            settings,
+            authorization,
+            limit=50,
+            offset=0,
+            date_range=date_range,
+            status="paid",
+        )
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengecek lead paid tanpa appointment dari admission-service.",
+        )
+    except Exception:
+        return _tool_failed(
+            tool_name,
+            "Saya belum bisa mengecek lead paid tanpa appointment dari admission-service.",
+        )
+
+    missing = [row for row in rows if not bool(row.get("hasActiveAppointment"))]
+    answer = _format_paid_without_appointment_answer(
+        missing,
+        total,
+        len(rows),
+        date_range,
+        language,
+    )
+    answer = _with_next_actions(answer, language, _next_actions("appointments", language))
+    return ToolAnswer(
+        answer=answer,
+        sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
 
@@ -1668,17 +1799,13 @@ def render_admissions_payments_report(
     if normalized == "xlsx":
         return ReportFile(
             filename=f"{filename_base}.xlsx",
-            media_type=(
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            ),
+            media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             body=_render_report_xlsx(report),
         )
     if normalized == "docx":
         return ReportFile(
             filename=f"{filename_base}.docx",
-            media_type=(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ),
+            media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             body=_render_report_docx(report),
         )
     if normalized == "pdf":
@@ -2483,9 +2610,7 @@ def _xlsx_sheet_xml(headers: list[str], rows: list[list[str]]) -> str:
         cells = []
         for column_index, value in enumerate(row, start=1):
             ref = f"{_xlsx_column_name(column_index)}{row_index}"
-            cells.append(
-                f'<c r="{ref}" t="inlineStr"><is><t>{xml_escape(value)}</t></is></c>'
-            )
+            cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{xml_escape(value)}</t></is></c>')
         sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -2567,8 +2692,7 @@ def _docx_table(headers: list[str], rows: list[list[str]]) -> str:
 
 def _docx_table_row(values: list[str]) -> str:
     cells = "".join(
-        f"<w:tc><w:p><w:r><w:t>{xml_escape(value)}</w:t></w:r></w:p></w:tc>"
-        for value in values
+        f"<w:tc><w:p><w:r><w:t>{xml_escape(value)}</w:t></w:r></w:p></w:tc>" for value in values
     )
     return f"<w:tr>{cells}</w:tr>"
 
@@ -2623,9 +2747,7 @@ def _simple_pdf(lines: list[str]) -> bytes:
             ).encode("ascii")
         )
     kids = " ".join(f"{number} 0 R" for number in page_numbers)
-    objects[2] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_numbers)} >>".encode(
-        "ascii"
-    )
+    objects[2] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_numbers)} >>".encode("ascii")
     return _pdf_document(objects)
 
 
@@ -2737,6 +2859,13 @@ def _extract_lead_rows(body: dict[str, Any]) -> tuple[list[dict[str, Any]], int]
     return [row for row in rows if isinstance(row, dict)], total
 
 
+def _extract_appointment_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise ValueError("service response missing data")
+    return [row for row in data if isinstance(row, dict)]
+
+
 async def _find_lead_row(
     settings: Settings,
     authorization: Optional[str],
@@ -2761,6 +2890,7 @@ async def _fetch_lead_rows(
     date_range: Optional[DateRange] = None,
     school: str = "",
     search: str = "",
+    status: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/leads")
     body = await _get_json(
@@ -2772,9 +2902,27 @@ async def _fetch_lead_rows(
             date_range=date_range,
             school=school,
             search=search,
+            status=status,
         ),
     )
     return _extract_lead_rows(body)
+
+
+async def _fetch_appointment_rows(
+    settings: Settings,
+    authorization: Optional[str],
+    *,
+    limit: int,
+    offset: int,
+    date_range: Optional[DateRange] = None,
+) -> list[dict[str, Any]]:
+    url = _join_url(settings.admission_service_url, "/api/leads/v1/admin/appointments")
+    body = await _get_json(
+        url,
+        authorization,
+        _appointment_list_params(limit=limit, offset=offset, date_range=date_range),
+    )
+    return _extract_appointment_rows(body)
 
 
 async def _fetch_lead_detail_body(
@@ -2798,6 +2946,7 @@ def _lead_list_params(
     date_range: Optional[DateRange] = None,
     school: str = "",
     search: str = "",
+    status: str = "",
 ) -> dict[str, str]:
     params = {"limit": str(limit), "offset": str(offset)}
     if date_range is not None:
@@ -2807,6 +2956,20 @@ def _lead_list_params(
         params["school"] = school
     if search:
         params["search"] = search
+    if status:
+        params["status"] = status
+    return params
+
+
+def _appointment_list_params(
+    limit: int,
+    offset: int,
+    date_range: Optional[DateRange] = None,
+) -> dict[str, str]:
+    params = {"limit": str(limit), "offset": str(offset)}
+    if date_range is not None:
+        params["dateFrom"] = date_range.start.astimezone(timezone.utc).isoformat()
+        params["dateTo"] = date_range.end.astimezone(timezone.utc).isoformat()
     return params
 
 
@@ -2846,6 +3009,97 @@ def _format_leads_list_answer(
             details.append(f"status: {lead_status}")
         suffix = f" ({'; '.join(details)})" if details else ""
         lines.append(f"{index}. {name}{suffix}")
+    return "\n".join(lines)
+
+
+def _format_appointments_list_answer(
+    rows: list[dict[str, Any]],
+    date_range: Optional[DateRange],
+    language: str,
+) -> str:
+    scope = _date_scope(date_range, language)
+    if not rows:
+        return (
+            f"No admissions appointments were returned{scope}."
+            if language == "en"
+            else f"Belum ada appointment admissions{scope}."
+        )
+
+    shown = min(len(rows), 5)
+    lines = [
+        f"Showing {shown} admissions appointments{scope}:"
+        if language == "en"
+        else f"Saya tampilkan {shown} appointment admissions{scope}:"
+    ]
+    for index, row in enumerate(rows[:shown], start=1):
+        parent = _clean_text(row.get("parentName")) or (
+            "Name unavailable" if language == "en" else "Nama belum tersedia"
+        )
+        when = _format_service_datetime(_clean_text(row.get("startsAt")), language)
+        status = _clean_text(row.get("status"))
+        appointment_type = _clean_text(row.get("appointmentType"))
+        staff = _clean_text(row.get("staffName")) or _clean_text(row.get("staffEmail"))
+        details = []
+        if when:
+            details.append(when)
+        if appointment_type:
+            details.append(appointment_type.replace("_", " "))
+        if status:
+            details.append(f"status: {status}")
+        if staff:
+            details.append(f"staff: {staff}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"{index}. {parent}{suffix}")
+    return "\n".join(lines)
+
+
+def _format_paid_without_appointment_answer(
+    rows: list[dict[str, Any]],
+    paid_total: int,
+    inspected_count: int,
+    date_range: Optional[DateRange],
+    language: str,
+) -> str:
+    scope = _date_scope(date_range, language)
+    if not rows:
+        return (
+            f"No paid leads without an active appointment were found{scope}."
+            if language == "en"
+            else f"Tidak ada lead paid tanpa appointment aktif{scope}."
+        )
+
+    shown = min(len(rows), 5)
+    lines = [
+        f"Found {len(rows)} paid leads without an active appointment{scope}. Showing {shown}:"
+        if language == "en"
+        else f"Ada {len(rows)} lead paid tanpa appointment aktif{scope}. Saya tampilkan {shown}:"
+    ]
+    for index, row in enumerate(rows[:shown], start=1):
+        name = _clean_text(row.get("parentName")) or (
+            "Name unavailable" if language == "en" else "Nama belum tersedia"
+        )
+        email = _clean_text(row.get("email"))
+        school = _clean_text(row.get("school"))
+        latest_status = _clean_text(row.get("latestAppointmentStatus"))
+        details = []
+        if email:
+            details.append(email)
+        if school:
+            details.append(f"school: {school}" if language == "en" else f"sekolah: {school}")
+        if latest_status:
+            details.append(
+                f"latest appointment: {latest_status}"
+                if language == "en"
+                else f"appointment terakhir: {latest_status}"
+            )
+        suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"{index}. {name}{suffix}")
+    if paid_total > inspected_count:
+        lines.append(
+            f"Note: {inspected_count} of {paid_total} paid leads were inspected in this response."
+            if language == "en"
+            else f"Catatan: {inspected_count} dari {paid_total} lead paid dicek di jawaban ini."
+        )
     return "\n".join(lines)
 
 
@@ -2996,9 +3250,11 @@ def _format_lead_detail_answer(
 
 def _format_student_detail_lines(students: list[dict[str, Any]], language: str) -> list[str]:
     if not students:
-        return ["Children: no submitted child records yet."] if language == "en" else [
-            "Anak: belum ada data anak yang sudah disubmit."
-        ]
+        return (
+            ["Children: no submitted child records yet."]
+            if language == "en"
+            else ["Anak: belum ada data anak yang sudah disubmit."]
+        )
 
     lines = ["Children:"] if language == "en" else ["Anak:"]
     for index, student in enumerate(students[:5], start=1):
@@ -3486,6 +3742,20 @@ def _format_day_label_en(day) -> str:
     return f"{month_names[day.month]} {day.day}, {day.year}"
 
 
+def _format_service_datetime(value: str, language: str) -> str:
+    if not value:
+        return ""
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized).astimezone(SCHOOL_TIME_ZONE)
+    except ValueError:
+        return value
+    if language == "en":
+        day = _format_day_label_en(parsed.date())
+        return f"{day} {parsed:%H:%M} WIB"
+    return f"{_format_day_label(parsed.date())} {parsed:%H:%M} WIB"
+
+
 def _asks_for_current_date(message: str) -> bool:
     direct_phrases = (
         "what day is today",
@@ -3716,6 +3986,90 @@ def _asks_for_admission_lead_identity(message: str) -> bool:
     )
 
 
+def _asks_for_paid_leads_without_appointment(message: str) -> bool:
+    paid_terms = (
+        "paid",
+        "lunas",
+        "sudah bayar",
+        "sudah payment",
+        "already paid",
+        "lead paid",
+        "eoi paid",
+    )
+    missing_terms = (
+        "without appointment",
+        "without booking",
+        "without schedule",
+        "no appointment",
+        "no booking",
+        "no schedule",
+        "not booked",
+        "not scheduled",
+        "tanpa appointment",
+        "tanpa booking",
+        "tanpa jadwal",
+        "belum appointment",
+        "belum ada appointment",
+        "belum booked",
+        "belum booking",
+        "belum dijadwalkan",
+    )
+    lead_terms = (
+        "lead",
+        "leads",
+        "eoi",
+        "pendaftar",
+        "registrasi",
+        "registration",
+        "keluarga",
+    )
+    return (
+        any(term in message for term in paid_terms)
+        and any(term in message for term in missing_terms)
+        and any(term in message for term in lead_terms)
+    )
+
+
+def _asks_for_appointment_list(message: str) -> bool:
+    appointment_terms = (
+        "appointment",
+        "appointments",
+        "booking",
+        "bookings",
+        "calendar",
+        "calendly",
+        "google calendar",
+        "jadwal",
+        "schedule",
+        "scheduling",
+        "consultation",
+        "konsultasi",
+        "campus tour",
+        "interview",
+    )
+    list_terms = (
+        "list",
+        "show",
+        "lihat",
+        "tampilkan",
+        "daftar",
+        "ada",
+        "hari ini",
+        "today",
+        "besok",
+        "tomorrow",
+        "minggu ini",
+        "this week",
+        "bulan ini",
+        "this month",
+        "siapa",
+        "who",
+    )
+    return any(term in message for term in appointment_terms) and any(
+        term in message for term in list_terms
+    )
+
+
 def _asks_for_lead_child_count(message: str) -> bool:
     count_terms = ("berapa", "jumlah", "count", "how many", "number of")
     child_terms = ("anak", "siswa", "murid", "student", "students", "child", "children", "kid")
@@ -3942,9 +4296,7 @@ def _compact_audit_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         source_kinds = event.get("sourceKinds")
         if isinstance(source_kinds, list):
             clean_event["sourceKinds"] = [
-                value[:64]
-                for value in source_kinds
-                if isinstance(value, str) and value
+                value[:64] for value in source_kinds if isinstance(value, str) and value
             ][:8]
         if all(key in clean_event for key in ("id", "createdAt", "actorRole", "tool", "status")):
             compacted.append(clean_event)
@@ -3970,6 +4322,8 @@ def _reportable_tool_names() -> set[str]:
         "admission.admin_lead_detail",
         "admission.admin_lead_child_count",
         "admission.admin_lead_students_list",
+        "admission.admin_appointments_list",
+        "admission.admin_paid_leads_without_appointment",
         "payment.admin_review_count",
         "payment.admin_review_detail",
         "payment.admin_reviews_list",
@@ -3987,8 +4341,10 @@ def _audit_events_for_response(
     date_range: Optional[DateRange],
 ) -> list[dict[str, Any]]:
     now = _now_jakarta().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    actor_role = payload.actor_role.value if isinstance(payload.actor_role, ActorRole) else str(
-        payload.actor_role
+    actor_role = (
+        payload.actor_role.value
+        if isinstance(payload.actor_role, ActorRole)
+        else str(payload.actor_role)
     )
     source_kinds = sorted(
         {
@@ -4763,6 +5119,11 @@ def _next_actions(kind: str, language: str) -> list[str]:
                 "Ask for the newest EOI details.",
                 "Ask for payment review priorities.",
             ],
+            "appointments": [
+                "Ask which paid leads still need an appointment.",
+                "Ask to rerun the calendar for today, tomorrow, or this week.",
+                "Open the lead detail page to create or reschedule an appointment.",
+            ],
         }
         return actions.get(kind, [])
 
@@ -4815,6 +5176,11 @@ def _next_actions(kind: str, language: str) -> list[str]:
             "Export laporan EOI + pembayaran hari ini.",
             "Lihat detail EOI terbaru.",
             "Minta prioritas review pembayaran.",
+        ],
+        "appointments": [
+            "Tanya lead paid mana yang masih perlu appointment.",
+            "Jalankan ulang kalender untuk hari ini, besok, atau minggu ini.",
+            "Buka detail lead untuk membuat atau menjadwalkan ulang appointment.",
         ],
     }
     return actions.get(kind, [])
