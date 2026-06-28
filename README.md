@@ -48,6 +48,6 @@ Useful local/provider settings:
 ## Tool Routing
 
 Owner/admin factual prompts are resolved through safe tools. The service first handles known
-patterns deterministically, then uses the configured Llama/OpenAI-compatible provider as an
+patterns deterministically, then uses the configured Qwen/OpenAI-compatible provider as an
 intent classifier for paraphrased questions. The model returns an approved tool intent only; the
 actual totals still come from `admission-service` or `payment-service`.
