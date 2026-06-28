@@ -609,7 +609,7 @@ def test_public_chat_streams_llm_deltas(monkeypatch) -> None:
 
         async def stream_complete(self, *args, **kwargs):
             yield "Halo "
-            yield "dari Llama"
+            yield "dari Qwen"
 
         async def complete(self, *args, **kwargs):
             raise AssertionError("stream endpoint should use stream_complete")
@@ -630,9 +630,9 @@ def test_public_chat_streams_llm_deltas(monkeypatch) -> None:
     events = parse_sse_events(response.text)
     assert [data["text"] for event, data in events if event == "delta"] == [
         "Halo ",
-        "dari Llama",
+        "dari Qwen",
     ]
-    assert events[-1][1]["answer"] == "Halo dari Llama"
+    assert events[-1][1]["answer"] == "Halo dari Qwen"
 
 
 def test_public_chat_stream_falls_back_when_llm_stream_stalls(monkeypatch) -> None:

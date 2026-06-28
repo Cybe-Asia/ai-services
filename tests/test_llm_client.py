@@ -9,7 +9,7 @@ from app.llm_client import (
 
 def test_qwen3_prompt_uses_no_think_control() -> None:
     assert _apply_model_prompt_controls("qwen3:14b", "berapa EOI?") == "berapa EOI? /no_think"
-    assert _apply_model_prompt_controls("llama3.2:1b", "berapa EOI?") == "berapa EOI?"
+    assert _apply_model_prompt_controls("gemma2:2b", "berapa EOI?") == "berapa EOI?"
     assert _apply_model_prompt_controls("qwen3:14b", "/think\nanalisa") == "/think\nanalisa"
 
 
@@ -17,7 +17,7 @@ def test_qwen3_uses_ollama_native_base_url() -> None:
     assert _ollama_native_base_url("qwen3:14b", "http://ollama:11434/v1") == (
         "http://ollama:11434"
     )
-    assert _ollama_native_base_url("llama3.2:1b", "http://ollama:11434/v1") is None
+    assert _ollama_native_base_url("gemma2:2b", "http://ollama:11434/v1") is None
     assert _ollama_native_base_url("qwen3:14b", "https://api.example.com/v1") is None
 
 
