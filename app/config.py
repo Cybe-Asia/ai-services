@@ -12,10 +12,10 @@ class Settings(BaseSettings):
     app_env: str = "local"
     server_port: int = 8082
 
-    # Production runs qwen3:14b via the shared on-prem CYBE AI Gateway
-    # (AI_PROVIDER_BASE_URL). Override AI_MODEL locally if your provider
-    # serves a smaller model.
-    ai_model: str = "qwen3:14b"
+    # Production runs qwen3:4b via the shared on-prem CYBE AI Gateway
+    # (AI_PROVIDER_BASE_URL) — chosen for CPU-inference latency. Override
+    # AI_MODEL locally if your provider serves a different model.
+    ai_model: str = "qwen3:4b"
     ai_provider_base_url: Optional[HttpUrl] = None
     ai_provider_api_key: Optional[str] = None
     ai_max_tokens: int = Field(default=256, ge=1, le=2048)
