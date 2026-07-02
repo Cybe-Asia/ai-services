@@ -16,6 +16,7 @@ def test_normalize_amount_indonesian_formats():
     assert normalize_amount(1500000) == 1500000
     assert normalize_amount(1500000.0) == 1500000
     assert normalize_amount("Rp250.000") == 250000
+    assert normalize_amount("Rp 1.500.000,-") == 1500000
     assert normalize_amount(None) is None
     assert normalize_amount("tidak terbaca") is None
 
@@ -34,6 +35,7 @@ def test_normalize_bank_aliases():
     assert normalize_bank("BCA") == "bca"
     assert normalize_bank("Livin' by Mandiri") == "mandiri"
     assert normalize_bank("SeaBank Indonesia") == "seabank"
+    assert normalize_bank("OCTO Mobile") == "cimb"
 
 
 def test_score_case_matches_equivalent_formats():
@@ -83,3 +85,20 @@ def test_parse_prediction_tolerates_fences_and_prose():
     assert parse_prediction("no json here") is None
     assert parse_prediction(None) is None
     assert parse_prediction("[1, 2]") is None
+
+
+def test_score_case_non_receipt_all_null_is_correct():
+    truth = {"is_receipt": False, "amount": None, "currency": None, "transfer_date": None,
+             "sender_name": None, "sender_bank": None, "reference": None}
+    prediction = dict(truth)
+    result = score_case("x.png", truth, prediction, latency_seconds=1.0)
+    assert result.all_correct
+
+
+def test_score_case_non_receipt_with_hallucinated_amount_is_miss():
+    truth = {"is_receipt": False, "amount": None, "currency": None, "transfer_date": None,
+             "sender_name": None, "sender_bank": None, "reference": None}
+    prediction = dict(truth, is_receipt=True, amount=1500000)
+    result = score_case("x.png", truth, prediction, latency_seconds=1.0)
+    assert not result.field_correct["is_receipt"]
+    assert not result.field_correct["amount"]

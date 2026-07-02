@@ -10,7 +10,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-FIELDS = ("amount", "currency", "transfer_date", "sender_name", "sender_bank", "reference")
+FIELDS = (
+    "is_receipt",
+    "amount",
+    "currency",
+    "transfer_date",
+    "sender_name",
+    "sender_bank",
+    "reference",
+)
 
 _INDONESIAN_MONTHS = {
     "januari": 1, "februari": 2, "maret": 3, "april": 4, "mei": 5, "juni": 6,
@@ -32,6 +40,8 @@ _BANK_ALIASES = {
     "seabank indonesia": "seabank",
     "bank jago": "jago",
     "cimb niaga": "cimb",
+    "octo mobile": "cimb",
+    "octo": "cimb",
 }
 
 
@@ -57,6 +67,8 @@ def normalize_amount(value: object) -> int | None:
     if not text:
         return None
 
+    # Trailing ",-" or "-" is the Indonesian "no cents" marker -> drop it.
+    text = re.sub(r",?-$", "", text)
     # Comma followed by exactly 2 digits at the end = decimal part -> drop it.
     text = re.sub(r",\d{2}$", "", text)
     # A dot followed by exactly 2 digits at the end is also decimal ("1500000.00").
@@ -123,12 +135,16 @@ def normalize_reference(value: object) -> str | None:
 
 def _match_amount(truth: object, pred: object) -> bool:
     truth_amount, pred_amount = normalize_amount(truth), normalize_amount(pred)
-    return truth_amount is not None and truth_amount == pred_amount
+    if truth_amount is None:
+        return pred_amount is None
+    return truth_amount == pred_amount
 
 
 def _match_date(truth: object, pred: object) -> bool:
-    normalized = normalize_date(truth)
-    return normalized is not None and normalized == normalize_date(pred)
+    truth_date, pred_date = normalize_date(truth), normalize_date(pred)
+    if truth_date is None:
+        return pred_date is None
+    return truth_date == pred_date
 
 
 def _match_name(truth: object, pred: object) -> bool:
@@ -154,7 +170,14 @@ def _match_reference(truth: object, pred: object) -> bool:
     return normalize_reference(truth) == normalize_reference(pred)
 
 
+def _match_is_receipt(truth: object, pred: object) -> bool:
+    if truth is None:
+        return True
+    return isinstance(pred, bool) and pred is bool(truth)
+
+
 _MATCHERS = {
+    "is_receipt": _match_is_receipt,
     "amount": _match_amount,
     "currency": _match_currency,
     "transfer_date": _match_date,

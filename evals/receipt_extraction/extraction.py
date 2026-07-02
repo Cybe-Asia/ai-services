@@ -70,7 +70,9 @@ Indonesian month names: Januari, Februari, Maret, April, Mei, Juni, Juli, \
 Agustus, September, Oktober, November, Desember.
 - sender_name: the account holder who sent the money (pengirim / dari / \
 sumber dana), not the recipient.
-- sender_bank: the bank or e-wallet the money was sent FROM.
+- sender_bank: the bank or e-wallet the money was sent FROM. The app \
+branding in the header or logo (m-BCA, Livin' by Mandiri, BRImo, GoPay, \
+OVO, DANA, SeaBank, ...) identifies the sending bank or e-wallet - use it.
 - reference: the transaction reference number (no. ref / no. transaksi / \
 reference number), exactly as printed.
 
