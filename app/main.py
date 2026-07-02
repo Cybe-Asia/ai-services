@@ -658,9 +658,11 @@ def _fallback_answer(payload: ChatRequest) -> str:
     if requires_privileged_role(payload.message):
         return (
             "Saya bisa bantu data operasional admin kalau ada tool resmi yang cocok. "
-            "Tool yang aktif saat ini mencakup EOI, detail anak pada lead, review pembayaran, "
-            "dan biaya pendaftaran. Untuk pertanyaan ini saya belum menemukan tool yang tepat, "
-            "jadi saya tidak akan mengarang data."
+            "Tool yang aktif saat ini: jumlah dan daftar EOI, detail lead dan anak, "
+            "funnel lead per step, lead yang stuck, appointment, lead paid tanpa "
+            "appointment, review pembayaran, biaya pendaftaran, laporan EOI + pembayaran, "
+            "dan briefing operasional. Untuk pertanyaan ini saya belum menemukan tool yang "
+            "tepat, jadi saya tidak akan mengarang data. Coba tanyakan salah satu data itu."
         )
     return (
         "AI service sudah aktif sebagai gateway awal. Untuk jawaban faktual, hubungkan "

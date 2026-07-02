@@ -3090,3 +3090,115 @@ def test_tool_intent_parser_accepts_operations_brief_alias() -> None:
     intent = service_tools._parse_tool_intent('{"intent":"ops_brief"}')
 
     assert intent.name == service_tools.INTENT_OPERATIONS_BRIEF
+
+
+def test_admin_funnel_question_uses_leads_funnel_tool(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url == "http://admission-service/api/leads/v1/admin/leads/funnel"
+        assert authorization == "Bearer test-token"
+        assert params == {}
+        return {
+            "data": [
+                {"step": "eoi_submitted", "total": 12, "stuck": 3},
+                {"step": "application_fee_paid", "total": 5, "stuck": 0},
+            ]
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(message="gimana funnel lead sekarang?", actor_role=ActorRole.admin),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert result.tool_calls[0].name == "admission.admin_leads_funnel"
+    assert result.tool_calls[0].status == "ok"
+    assert "17 lead" in result.answer
+    assert "EOI masuk - 12 lead (3 stuck)" in result.answer
+    assert "Biaya pendaftaran dibayar - 5 lead" in result.answer
+
+
+def test_admin_stuck_leads_question_focuses_on_stuck_buckets(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url.endswith("/api/leads/v1/admin/leads/funnel")
+        return {
+            "data": [
+                {"step": "eoi_submitted", "total": 12, "stuck": 3},
+                {"step": "awaiting_proof", "total": 6, "stuck": 5},
+                {"step": "application_fee_paid", "total": 5, "stuck": 0},
+            ]
+        }
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(message="lead mana yang macet di funnel?", actor_role=ActorRole.admin),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert result.tool_calls[0].name == "admission.admin_leads_funnel"
+    assert "8 lead stuck" in result.answer
+    assert result.answer.index("Menunggu bukti bayar") < result.answer.index("EOI masuk")
+    assert "Biaya pendaftaran dibayar" not in result.answer
+
+
+def test_stuck_leads_question_routes_in_english(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        assert url.endswith("/api/leads/v1/admin/leads/funnel")
+        return {"data": [{"step": "awaiting_proof", "total": 6, "stuck": 2}]}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(
+                message="which leads are stuck in the funnel?",
+                actor_role=ActorRole.admin,
+                locale="en",
+            ),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "2 leads are stuck" in result.answer
+    assert "Awaiting payment proof - 2 of 6 leads stuck" in result.answer
+
+
+def test_stuck_leads_answer_when_nothing_is_stuck(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        return {"data": [{"step": "eoi_submitted", "total": 4, "stuck": 0}]}
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(message="ada lead yang stuck gak?", actor_role=ActorRole.admin),
+            Settings(),
+            "Bearer test-token",
+        )
+    )
+
+    assert result is not None
+    assert "Tidak ada lead yang stuck" in result.answer
+
+
+def test_funnel_question_is_not_answered_for_public_role(monkeypatch) -> None:
+    async def fake_get_json(url, authorization, params):
+        raise AssertionError("public role must not reach the funnel tool")
+
+    monkeypatch.setattr(service_tools, "_get_json", fake_get_json)
+    result = asyncio.run(
+        service_tools.answer_from_school_tools(
+            ChatRequest(message="gimana funnel lead sekarang?", actor_role=ActorRole.public),
+            Settings(),
+            None,
+        )
+    )
+
+    assert result is None

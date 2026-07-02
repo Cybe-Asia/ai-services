@@ -24,6 +24,8 @@ INTENT_ADMISSION_LEAD_CHILD_COUNT = "admission_lead_child_count"
 INTENT_ADMISSION_LEAD_STUDENTS_LIST = "admission_lead_students_list"
 INTENT_ADMISSION_APPOINTMENTS_LIST = "admission_appointments_list"
 INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT = "admission_paid_leads_without_appointment"
+INTENT_ADMISSION_FUNNEL = "admission_funnel"
+INTENT_ADMISSION_STUCK_LEADS = "admission_stuck_leads"
 INTENT_PAYMENT_REVIEW_COUNT = "payment_review_count"
 INTENT_PAYMENT_REVIEW_LIST = "payment_review_list"
 INTENT_PAYMENT_REVIEW_DETAIL = "payment_review_detail"
@@ -316,6 +318,10 @@ async def answer_from_school_tools(
         )
     if intent.name == INTENT_ADMISSION_APPOINTMENTS_LIST:
         return await _admission_appointments_list(settings, authorization, date_range, language)
+    if intent.name == INTENT_ADMISSION_FUNNEL:
+        return await _admission_funnel_answer(settings, authorization, language)
+    if intent.name == INTENT_ADMISSION_STUCK_LEADS:
+        return await _admission_stuck_leads_answer(settings, authorization, language)
     if intent.name == INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT:
         return await _admission_paid_leads_without_appointment(
             settings,
@@ -364,6 +370,10 @@ def _deterministic_tool_intent(message: str) -> ToolIntent:
         return ToolIntent(INTENT_OPERATIONS_BRIEF)
     if _asks_for_admissions_payments_report(message):
         return ToolIntent(INTENT_ADMISSIONS_PAYMENTS_REPORT)
+    if _asks_for_stuck_leads(message):
+        return ToolIntent(INTENT_ADMISSION_STUCK_LEADS)
+    if _asks_for_admission_funnel(message):
+        return ToolIntent(INTENT_ADMISSION_FUNNEL)
     if _asks_for_lead_child_count(message):
         return ToolIntent(INTENT_ADMISSION_LEAD_CHILD_COUNT)
     if _asks_for_lead_child_identity(message):
@@ -482,6 +492,10 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "campus tour, or staff availability lists, use admission_appointments_list. "
         "If user asks paid leads or paid EOIs without an appointment/booking/schedule, "
         "use admission_paid_leads_without_appointment. "
+        "If user asks the funnel, pipeline, or per-step breakdown of leads, "
+        "use admission_funnel. "
+        "If user asks which or how many leads are stuck, stalled, macet, or not moving "
+        "between steps, use admission_stuck_leads. "
         "If user asks full details of a specific payment row, use payment_review_detail. "
         "If user asks to report/export/download/show EOI together with payment data, "
         "use admissions_payments_report. "
@@ -496,6 +510,9 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         '{"intent":"payment_review_count","paymentStatus":"pending_verification"}. '
         'Example: "which paid leads have no appointment booked?" => '
         '{"intent":"admission_paid_leads_without_appointment"}. '
+        'Example: "gimana funnel lead sekarang?" => {"intent":"admission_funnel"}. '
+        'Example: "lead mana yang macet di step pembayaran?" => '
+        '{"intent":"admission_stuck_leads"}. '
         'Example: "jadwal appointment hari ini" => {"intent":"admission_appointments_list"}. '
         'Example: "export EOI and payment this month" => '
         '{"intent":"admissions_payments_report"}. '
@@ -616,6 +633,15 @@ def _normalize_intent(value: Any) -> str:
         "paid_leads_no_appointment": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
         "paid_leads_without_booking": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
         "paid_eoi_without_appointment": INTENT_ADMISSION_PAID_LEADS_WITHOUT_APPOINTMENT,
+        INTENT_ADMISSION_FUNNEL: INTENT_ADMISSION_FUNNEL,
+        "admission_leads_funnel": INTENT_ADMISSION_FUNNEL,
+        "leads_funnel": INTENT_ADMISSION_FUNNEL,
+        "funnel_summary": INTENT_ADMISSION_FUNNEL,
+        "pipeline_summary": INTENT_ADMISSION_FUNNEL,
+        INTENT_ADMISSION_STUCK_LEADS: INTENT_ADMISSION_STUCK_LEADS,
+        "stuck_leads": INTENT_ADMISSION_STUCK_LEADS,
+        "leads_stuck": INTENT_ADMISSION_STUCK_LEADS,
+        "stuck_lead_count": INTENT_ADMISSION_STUCK_LEADS,
         INTENT_PAYMENT_REVIEW_COUNT: INTENT_PAYMENT_REVIEW_COUNT,
         "payment_admin_review_count": INTENT_PAYMENT_REVIEW_COUNT,
         "payment_count": INTENT_PAYMENT_REVIEW_COUNT,
@@ -1132,6 +1158,177 @@ async def _admission_paid_leads_without_appointment(
         sources=[SourceRef(kind="service", title="admission-service admin leads", reference=None)],
         tool_calls=[ToolCallRef(name=tool_name, status="ok")],
     )
+
+
+_FUNNEL_STEP_LABELS = {
+    "eoi_submitted": ("EOI submitted", "EOI masuk"),
+    "email_verified": ("Email verified", "Email terverifikasi"),
+    "sign_in_set": ("Password created", "Password dibuat"),
+    "engagement_set": ("Engagement booked", "Engagement terjadwal"),
+    "students_added": ("Student details added", "Data siswa terisi"),
+    "awaiting_proof": ("Awaiting payment proof", "Menunggu bukti bayar"),
+    "application_fee_paid": ("Application fee paid", "Biaya pendaftaran dibayar"),
+    "documents_requested": ("Documents requested", "Dokumen diminta"),
+    "documents_complete": ("Documents complete", "Dokumen lengkap"),
+    "test_booked": ("Test booked", "Tes terjadwal"),
+    "offer_pending": ("Offer pending", "Menunggu penawaran"),
+    "approved": ("Approved", "Disetujui"),
+}
+
+_FUNNEL_FAILED_ID = "Saya belum bisa mengambil funnel lead dari admission-service."
+
+
+def _funnel_step_label(step: str, language: str) -> str:
+    labels = _FUNNEL_STEP_LABELS.get(step)
+    if labels is None:
+        return step.replace("_", " ")
+    return labels[0] if language == "en" else labels[1]
+
+
+async def _fetch_funnel_buckets(
+    settings: Settings,
+    authorization: Optional[str],
+) -> list[dict[str, Any]]:
+    body = await _get_json(
+        f"{settings.admission_service_url}/api/leads/v1/admin/leads/funnel",
+        authorization,
+        {},
+    )
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise ValueError("service response missing funnel buckets")
+
+    buckets: list[dict[str, Any]] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        step = row.get("step")
+        total = row.get("total")
+        stuck = row.get("stuck")
+        if isinstance(step, str) and isinstance(total, int) and isinstance(stuck, int):
+            buckets.append({"step": step, "total": total, "stuck": stuck})
+    return buckets
+
+
+async def _admission_funnel_answer(
+    settings: Settings,
+    authorization: Optional[str],
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "admission.admin_leads_funnel"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "funnel lead per step")
+
+    try:
+        buckets = await _fetch_funnel_buckets(settings, authorization)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(tool_name, _FUNNEL_FAILED_ID)
+    except Exception:
+        return _tool_failed(tool_name, _FUNNEL_FAILED_ID)
+
+    answer = _format_funnel_answer(buckets, language)
+    answer = _with_next_actions(answer, language, _next_actions("funnel", language))
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service leads funnel", reference=None)
+        ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok" if buckets else "not_found")],
+    )
+
+
+def _format_funnel_answer(buckets: list[dict[str, Any]], language: str) -> str:
+    if not buckets:
+        return (
+            "There are no active leads in the funnel yet."
+            if language == "en"
+            else "Belum ada lead aktif di funnel."
+        )
+
+    total = sum(bucket["total"] for bucket in buckets)
+    stuck_total = sum(bucket["stuck"] for bucket in buckets)
+    if language == "en":
+        lines = [
+            f"Active lead funnel: {total} leads, "
+            f"{stuck_total} stuck >=3 days in the same step."
+        ]
+    else:
+        lines = [
+            f"Funnel lead aktif: {total} lead, "
+            f"{stuck_total} stuck >=3 hari di step yang sama."
+        ]
+    unit = "leads" if language == "en" else "lead"
+    for index, bucket in enumerate(buckets, start=1):
+        label = _funnel_step_label(bucket["step"], language)
+        line = f"{index}. {label} - {bucket['total']} {unit}"
+        if bucket["stuck"]:
+            line = f"{line} ({bucket['stuck']} stuck)"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+async def _admission_stuck_leads_answer(
+    settings: Settings,
+    authorization: Optional[str],
+    language: str = "id",
+) -> ToolAnswer:
+    tool_name = "admission.admin_leads_funnel"
+    if not _has_bearer_token(authorization):
+        return _auth_required(tool_name, "lead yang stuck di funnel")
+
+    try:
+        buckets = await _fetch_funnel_buckets(settings, authorization)
+    except httpx.HTTPStatusError as exc:
+        auth_error = _auth_status_tool_error(tool_name, exc.response.status_code)
+        if auth_error is not None:
+            return auth_error
+        return _tool_failed(tool_name, _FUNNEL_FAILED_ID)
+    except Exception:
+        return _tool_failed(tool_name, _FUNNEL_FAILED_ID)
+
+    stuck_buckets = sorted(
+        (bucket for bucket in buckets if bucket["stuck"] > 0),
+        key=lambda bucket: bucket["stuck"],
+        reverse=True,
+    )
+    answer = _format_stuck_leads_answer(stuck_buckets, language)
+    answer = _with_next_actions(answer, language, _next_actions("stuck", language))
+    return ToolAnswer(
+        answer=answer,
+        sources=[
+            SourceRef(kind="service", title="admission-service leads funnel", reference=None)
+        ],
+        tool_calls=[ToolCallRef(name=tool_name, status="ok" if buckets else "not_found")],
+    )
+
+
+def _format_stuck_leads_answer(stuck_buckets: list[dict[str, Any]], language: str) -> str:
+    if not stuck_buckets:
+        return (
+            "No leads are stuck >=3 days in any step right now."
+            if language == "en"
+            else "Tidak ada lead yang stuck >=3 hari di step mana pun saat ini."
+        )
+
+    stuck_total = sum(bucket["stuck"] for bucket in stuck_buckets)
+    if language == "en":
+        lines = [f"{stuck_total} leads are stuck >=3 days in the same step:"]
+        for index, bucket in enumerate(stuck_buckets, start=1):
+            label = _funnel_step_label(bucket["step"], "en")
+            lines.append(
+                f"{index}. {label} - {bucket['stuck']} of {bucket['total']} leads stuck"
+            )
+    else:
+        lines = [f"{stuck_total} lead stuck >=3 hari di step yang sama:"]
+        for index, bucket in enumerate(stuck_buckets, start=1):
+            label = _funnel_step_label(bucket["step"], "id")
+            lines.append(
+                f"{index}. {label} - {bucket['stuck']} dari {bucket['total']} lead stuck"
+            )
+    return "\n".join(lines)
 
 
 async def _contextual_lead_row_for_detail(
@@ -3986,6 +4183,48 @@ def _asks_for_admission_lead_identity(message: str) -> bool:
     )
 
 
+def _asks_for_admission_funnel(message: str) -> bool:
+    strong_terms = ("funnel", "corong konversi", "pipeline lead", "pipeline marketing")
+    if any(term in message for term in strong_terms):
+        return True
+    step_terms = (
+        "per step",
+        "per langkah",
+        "per tahap",
+        "tiap step",
+        "tiap tahap",
+        "setiap step",
+        "setiap tahap",
+        "breakdown step",
+        "sebaran step",
+    )
+    lead_terms = ("lead", "eoi", "pendaftar", "calon")
+    return any(term in message for term in step_terms) and any(
+        term in message for term in lead_terms
+    )
+
+
+def _asks_for_stuck_leads(message: str) -> bool:
+    stuck_terms = (
+        "stuck",
+        "macet",
+        "mandek",
+        "mandeg",
+        "nyangkut",
+        "tertahan",
+        "stalled",
+        "tidak bergerak",
+        "gak bergerak",
+        "not moving",
+        "no progress",
+        "belum lanjut",
+    )
+    lead_terms = ("lead", "eoi", "pendaftar", "calon", "funnel", "step", "tahap", "pipeline")
+    return any(term in message for term in stuck_terms) and any(
+        term in message for term in lead_terms
+    )
+
+
 def _asks_for_paid_leads_without_appointment(message: str) -> bool:
     paid_terms = (
         "paid",
@@ -5119,6 +5358,16 @@ def _next_actions(kind: str, language: str) -> list[str]:
                 "Ask for the newest EOI details.",
                 "Ask for payment review priorities.",
             ],
+            "funnel": [
+                "Ask which leads are stuck to focus follow-up.",
+                "Ask for the lead list if you need names for a step.",
+                "Ask for an EOI + payment report to share this snapshot.",
+            ],
+            "stuck": [
+                "Open the marketing work queue to follow up stuck leads.",
+                "Ask which paid leads have no appointment to unblock scheduling.",
+                "Ask for a follow-up message draft for a stuck parent.",
+            ],
             "appointments": [
                 "Ask which paid leads still need an appointment.",
                 "Ask to rerun the calendar for today, tomorrow, or this week.",
@@ -5176,6 +5425,16 @@ def _next_actions(kind: str, language: str) -> list[str]:
             "Export laporan EOI + pembayaran hari ini.",
             "Lihat detail EOI terbaru.",
             "Minta prioritas review pembayaran.",
+        ],
+        "funnel": [
+            "Tanya lead mana yang stuck untuk fokus follow-up.",
+            "Minta daftar lead kalau butuh nama untuk satu step.",
+            "Minta laporan EOI + pembayaran untuk membagikan snapshot ini.",
+        ],
+        "stuck": [
+            "Buka work queue marketing untuk follow-up lead yang stuck.",
+            "Tanya lead paid tanpa appointment untuk membuka blokir jadwal.",
+            "Minta draft pesan follow-up untuk parent yang stuck.",
         ],
         "appointments": [
             "Tanya lead paid mana yang masih perlu appointment.",
