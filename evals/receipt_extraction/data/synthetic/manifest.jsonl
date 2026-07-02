@@ -1,0 +1,10 @@
+{"image": "images/bca_clean.png", "truth": {"amount": 1500000, "currency": "IDR", "transfer_date": "2026-06-28", "sender_name": "Budi Santoso", "sender_bank": "BCA", "reference": "95031428796541"}}
+{"image": "images/mandiri_clean.png", "truth": {"amount": 2750000, "currency": "IDR", "transfer_date": "2026-06-25", "sender_name": "Siti Rahayu", "sender_bank": "Mandiri", "reference": "2506251407TRF88123"}}
+{"image": "images/seabank_clean.png", "truth": {"amount": 500000, "currency": "IDR", "transfer_date": "2026-06-30", "sender_name": "Agus Wijaya", "sender_bank": "SeaBank", "reference": "SB20260630112233"}}
+{"image": "images/qris_dana.png", "truth": {"amount": 250000, "currency": "IDR", "transfer_date": "2026-07-01", "sender_name": "Dewi Lestari", "sender_bank": "DANA", "reference": "QR0107261530448899"}}
+{"image": "images/bni_clean.png", "truth": {"amount": 1750000, "currency": "IDR", "transfer_date": "2026-06-27", "sender_name": "Rina Kusuma", "sender_bank": "BNI", "reference": "IB20260627556677"}}
+{"image": "images/brimo_clean.png", "truth": {"amount": 3200000, "currency": "IDR", "transfer_date": "2026-06-29", "sender_name": "Joko Prasetyo", "sender_bank": "BRI", "reference": "BRI2906260814352211"}}
+{"image": "images/bca_admin_fee_trap.png", "truth": {"amount": 1000000, "currency": "IDR", "transfer_date": "2026-06-26", "sender_name": "Maya Sari", "sender_bank": "BCA", "reference": "95031429911223"}}
+{"image": "images/bca_blur.png", "truth": {"amount": 1250000, "currency": "IDR", "transfer_date": "2026-06-24", "sender_name": "Andi Saputra", "sender_bank": "BCA", "reference": "95031427733489"}}
+{"image": "images/mandiri_lowres.png", "truth": {"amount": 950000, "currency": "IDR", "transfer_date": "2026-06-22", "sender_name": "Fitri Handayani", "sender_bank": "Mandiri", "reference": "2206261031TRF55678"}}
+{"image": "images/seabank_photo.png", "truth": {"amount": 4500000, "currency": "IDR", "transfer_date": "2026-06-21", "sender_name": "Hendra Gunawan", "sender_bank": "SeaBank", "reference": "SB20260621998811"}}
