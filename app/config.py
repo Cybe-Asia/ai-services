@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # it retains ownership of storage and applicant facts.
     document_analysis_enabled: bool = False
     document_analysis_internal_token: Optional[str] = None
+    document_analysis_adapter: Literal["openai_compatible", "cybe_gateway_vision"] = (
+        "openai_compatible"
+    )
     document_analysis_model: str = "qwen2.5vl:7b"
     document_analysis_schema_version: str = "1.0"
     document_analysis_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)

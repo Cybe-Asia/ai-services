@@ -127,6 +127,51 @@ class LlmClient:
         content = (choices[0].get("message") or {}).get("content") if choices else None
         return content.strip() if isinstance(content, str) and content.strip() else None
 
+    async def complete_gateway_vision(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        image_base64: str,
+        json_schema: dict,
+        temperature: float = 0.0,
+        max_tokens: int = 768,
+        timeout_seconds: Optional[float] = None,
+    ) -> Optional[str]:
+        """Call CYBE Gateway's bounded vision adapter without leaking provider details."""
+        if self._settings.ai_provider_base_url is None:
+            return None
+        base_url = str(self._settings.ai_provider_base_url).rstrip("/")
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        payload = {
+            "model": model,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "image_base64": image_base64,
+            "json_schema": json_schema,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{base_url}/vision/extract",
+                json=payload,
+                headers=_provider_headers(self._settings),
+            ) as response:
+                response.raise_for_status()
+                if int(response.headers.get("content-length", "0")) > 64 * 1024:
+                    raise ValueError("provider response is too large")
+                raw = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(raw) + len(chunk) > 64 * 1024:
+                        raise ValueError("provider response is too large")
+                    raw.extend(chunk)
+                body = json.loads(raw)
+        content = body.get("content")
+        return content.strip() if isinstance(content, str) and content.strip() else None
+
     async def _complete_ollama_native(
         self,
         base_url: str,

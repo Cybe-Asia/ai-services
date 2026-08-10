@@ -135,6 +135,75 @@ def validate_and_render(data: bytes, content_type: str, settings: Settings) -> l
     return encoded
 
 
+def _parse_model_finding(raw: str) -> ModelFinding:
+    text = raw.strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline < 0 or not text.endswith("```"):
+            raise ValueError("invalid structured model output")
+        text = text[first_newline + 1 : -3].strip()
+    return ModelFinding.model_validate(json.loads(text))
+
+
+def _merge_page_findings(findings: list[ModelFinding]) -> ModelFinding:
+    if not findings:
+        raise RuntimeError("document analysis provider unavailable")
+
+    type_rank = {"birth_certificate": 2, "other": 1, "unknown": 0}
+    readability_rank = {"readable": 2, "partially_readable": 1, "unreadable": 0}
+
+    def rank(item: ModelFinding) -> tuple[int, int, int]:
+        present = sum(
+            bool(value and value.strip())
+            for value in (
+                item.fields.student_name,
+                item.fields.date_of_birth,
+                item.fields.registration_number,
+            )
+        )
+        return (
+            type_rank[item.detected_document_type],
+            readability_rank[item.readability],
+            present,
+        )
+
+    primary = max(enumerate(findings), key=lambda pair: (rank(pair[1]), -pair[0]))[1]
+    candidate_pages = [
+        item
+        for item in findings
+        if item.detected_document_type == primary.detected_document_type
+    ]
+
+    def first_nonblank(field: str) -> Optional[str]:
+        for item in candidate_pages:
+            value = getattr(item.fields, field)
+            if value and value.strip():
+                return value.strip()
+        return None
+
+    student_name = first_nonblank("student_name")
+    date_of_birth = first_nonblank("date_of_birth")
+    registration_number = first_nonblank("registration_number")
+    warnings = list(dict.fromkeys(w for item in findings for w in item.warnings))[:12]
+    return ModelFinding.model_validate(
+        {
+            "detectedDocumentType": primary.detected_document_type,
+            "readability": primary.readability,
+            "fields": {
+                "studentName": student_name,
+                "dateOfBirth": date_of_birth,
+                "registrationNumber": registration_number,
+            },
+            "requiredFields": {
+                "studentNamePresent": student_name is not None,
+                "dateOfBirthPresent": date_of_birth is not None,
+                "registrationNumberPresent": registration_number is not None,
+            },
+            "warnings": warnings,
+        }
+    )
+
+
 async def analyze_birth_certificate(
     data: bytes, content_type: str, settings: Settings
 ) -> DocumentAnalysisResponse:
@@ -156,17 +225,35 @@ async def analyze_birth_certificate(
         }
         for encoded in images
     )
-    raw = await LlmClient(settings).complete_multimodal(
-        model=settings.document_analysis_model,
-        system_prompt=SYSTEM_PROMPT,
-        user_content=content,
-        temperature=0,
-        max_tokens=768,
-        response_format={"type": "json_object"},
-    )
-    if raw is None:
-        raise RuntimeError("document analysis provider unavailable")
-    finding = ModelFinding.model_validate(json.loads(raw))
+    client = LlmClient(settings)
+    if settings.document_analysis_adapter == "cybe_gateway_vision":
+        findings = []
+        for encoded in images:
+            raw = await client.complete_gateway_vision(
+                model=settings.document_analysis_model,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=content[0]["text"],
+                image_base64=encoded,
+                json_schema=ModelFinding.model_json_schema(by_alias=True),
+                temperature=0,
+                max_tokens=768,
+            )
+            if raw is None:
+                raise RuntimeError("document analysis provider unavailable")
+            findings.append(_parse_model_finding(raw))
+        finding = _merge_page_findings(findings)
+    else:
+        raw = await client.complete_multimodal(
+            model=settings.document_analysis_model,
+            system_prompt=SYSTEM_PROMPT,
+            user_content=content,
+            temperature=0,
+            max_tokens=768,
+            response_format={"type": "json_object"},
+        )
+        if raw is None:
+            raise RuntimeError("document analysis provider unavailable")
+        finding = _parse_model_finding(raw)
     return DocumentAnalysisResponse.model_validate(
         {
             "schemaVersion": settings.document_analysis_schema_version,
