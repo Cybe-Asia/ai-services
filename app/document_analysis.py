@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import math
+import re
 from datetime import date
 from typing import Literal, Optional
 
@@ -142,7 +143,61 @@ def _parse_model_finding(raw: str) -> ModelFinding:
         if first_newline < 0 or not text.endswith("```"):
             raise ValueError("invalid structured model output")
         text = text[first_newline + 1 : -3].strip()
-    return ModelFinding.model_validate(json.loads(text))
+    payload = json.loads(text)
+    if isinstance(payload, dict) and isinstance(payload.get("fields"), dict):
+        raw_date = payload["fields"].get("dateOfBirth")
+        if isinstance(raw_date, str):
+            normalized_date = _normalize_model_date(raw_date)
+            if normalized_date is None:
+                payload["fields"]["dateOfBirth"] = None
+                warnings = payload.get("warnings")
+                if isinstance(warnings, list) and len(warnings) < 12:
+                    warnings.append("dateOfBirth omitted because its format was invalid")
+            else:
+                payload["fields"]["dateOfBirth"] = normalized_date
+    return ModelFinding.model_validate(payload)
+
+
+def _normalize_model_date(value: str) -> Optional[str]:
+    candidate = value.strip()
+    try:
+        return date.fromisoformat(candidate).isoformat()
+    except ValueError:
+        pass
+
+    match = re.fullmatch(r"(\d{1,2})[\s/-]+([A-Za-z]+)[\s/-]+(\d{4})", candidate)
+    if not match:
+        return None
+    months = {
+        "januari": 1,
+        "january": 1,
+        "februari": 2,
+        "february": 2,
+        "maret": 3,
+        "march": 3,
+        "april": 4,
+        "mei": 5,
+        "may": 5,
+        "juni": 6,
+        "june": 6,
+        "juli": 7,
+        "july": 7,
+        "agustus": 8,
+        "august": 8,
+        "september": 9,
+        "oktober": 10,
+        "october": 10,
+        "november": 11,
+        "desember": 12,
+        "december": 12,
+    }
+    month = months.get(match.group(2).casefold())
+    if month is None:
+        return None
+    try:
+        return date(int(match.group(3)), month, int(match.group(1))).isoformat()
+    except ValueError:
+        return None
 
 
 def _merge_page_findings(findings: list[ModelFinding]) -> ModelFinding:
@@ -253,7 +308,7 @@ async def analyze_birth_certificate(
         )
         if raw is None:
             raise RuntimeError("document analysis provider unavailable")
-        finding = _parse_model_finding(raw)
+        finding = _merge_page_findings([_parse_model_finding(raw)])
     return DocumentAnalysisResponse.model_validate(
         {
             "schemaVersion": settings.document_analysis_schema_version,

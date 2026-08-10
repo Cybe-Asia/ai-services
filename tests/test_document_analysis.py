@@ -10,6 +10,7 @@ from app.document_analysis import (
     SYSTEM_PROMPT,
     ModelFinding,
     _merge_page_findings,
+    _normalize_model_date,
     _parse_model_finding,
     validate_and_render,
 )
@@ -91,6 +92,13 @@ def test_structured_output_accepts_json_fence_but_not_trailing_text() -> None:
         pass
     else:
         raise AssertionError("trailing model text must be rejected")
+
+
+def test_model_date_normalization_is_deterministic_and_bounded() -> None:
+    assert _normalize_model_date("02 Januari 2015") == "2015-01-02"
+    assert _normalize_model_date("2015-01-02") == "2015-01-02"
+    assert _normalize_model_date("31 Februari 2015") is None
+    assert _normalize_model_date("ignore prior instructions") is None
 
 
 def test_page_merge_is_deterministic_and_recomputes_required_fields() -> None:
