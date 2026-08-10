@@ -77,6 +77,17 @@ def test_model_output_contract_rejects_extra_fields() -> None:
         raise AssertionError("extra model fields must be rejected")
 
 
+def test_model_output_contract_rejects_coerced_boolean_types() -> None:
+    payload = finding().model_dump(by_alias=True)
+    payload["requiredFields"]["studentNamePresent"] = "true"
+    try:
+        ModelFinding.model_validate(payload)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("string booleans must not be coerced")
+
+
 def test_prompt_treats_document_text_as_untrusted_data() -> None:
     lowered = SYSTEM_PROMPT.casefold()
     assert "untrusted data" in lowered
@@ -125,10 +136,25 @@ def test_page_merge_is_deterministic_and_recomputes_required_fields() -> None:
         warnings=["page two"],
     )
     merged = _merge_page_findings([partial, second])
-    assert merged.fields.student_name == "Synthetic Student"
+    assert merged.fields.student_name is None
     assert merged.fields.date_of_birth == "2018-01-02"
-    assert merged.required_fields.student_name_present is True
+    assert merged.required_fields.student_name_present is False
     assert merged.warnings == ["page one", "page two"]
+
+
+def test_page_merge_nulls_conflicting_values_instead_of_synthesizing() -> None:
+    first = finding()
+    second = finding(
+        fields={
+            "studentName": "Different Student",
+            "dateOfBirth": "2018-01-02",
+            "registrationNumber": "SYN-001",
+        }
+    )
+    merged = _merge_page_findings([first, second])
+    assert merged.fields.student_name is None
+    assert merged.required_fields.student_name_present is False
+    assert "conflicting student_name" in merged.warnings[-1]
 
 
 def test_gateway_adapter_uses_single_page_vision_contract(monkeypatch) -> None:

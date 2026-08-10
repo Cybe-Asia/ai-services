@@ -16,7 +16,7 @@ from app.llm_client import LlmClient
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class ExtractedFields(StrictModel):
@@ -75,7 +75,7 @@ Classify the actual document type independently from the expected type."""
 def validate_and_render(data: bytes, content_type: str, settings: Settings) -> list[str]:
     if not data or len(data) > settings.document_analysis_max_bytes:
         raise ValueError("file size is outside the allowed range")
-    images: list[Image.Image] = []
+    encoded: list[str] = []
     if data.startswith(b"%PDF-"):
         if content_type != "application/pdf":
             raise ValueError("declared type does not match file signature")
@@ -98,14 +98,27 @@ def validate_and_render(data: bytes, content_type: str, settings: Settings) -> l
                     not math.isfinite(pixels)
                     or width <= 0
                     or height <= 0
-                    or pixels > 20_000_000
+                    or pixels > 8_000_000
                 ):
                     raise ValueError("PDF page dimensions are outside the allowed range")
                 total_pixels += pixels
-            if total_pixels > 40_000_000:
+            if total_pixels > 16_000_000:
                 raise ValueError("PDF rendered size is outside the allowed range")
             document = pdfium.PdfDocument(data)
-            images = [page.render(scale=scale).to_pil() for page in document]
+            try:
+                for page in document:
+                    bitmap = page.render(scale=scale)
+                    try:
+                        image = bitmap.to_pil()
+                        try:
+                            encoded.append(_encode_image(image))
+                        finally:
+                            image.close()
+                    finally:
+                        bitmap.close()
+                    page.close()
+            finally:
+                document.close()
         except ValueError:
             raise
         except Exception as exc:
@@ -116,11 +129,15 @@ def validate_and_render(data: bytes, content_type: str, settings: Settings) -> l
             raise ValueError("declared type does not match file signature")
         try:
             image = Image.open(io.BytesIO(data))
-            if image.width * image.height > 40_000_000:
+            if image.width * image.height > 8_000_000:
                 raise ValueError("image dimensions are too large")
             image.verify()
-            image = Image.open(io.BytesIO(data)).convert("RGB")
-            images = [image]
+            with Image.open(io.BytesIO(data)) as source:
+                converted = source.convert("RGB")
+                try:
+                    encoded.append(_encode_image(converted))
+                finally:
+                    converted.close()
         except ValueError:
             raise
         except Exception as exc:
@@ -128,12 +145,16 @@ def validate_and_render(data: bytes, content_type: str, settings: Settings) -> l
     else:
         raise ValueError("unsupported file signature")
 
-    encoded: list[str] = []
-    for image in images:
-        output = io.BytesIO()
-        image.convert("RGB").save(output, format="JPEG", quality=88, optimize=True)
-        encoded.append(base64.b64encode(output.getvalue()).decode("ascii"))
     return encoded
+
+
+def _encode_image(image: Image.Image) -> str:
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=85)
+    rendered = output.getvalue()
+    if len(rendered) > 9_000_000:
+        raise ValueError("rendered image is too large")
+    return base64.b64encode(rendered).decode("ascii")
 
 
 def _parse_model_finding(raw: str) -> ModelFinding:
@@ -229,17 +250,27 @@ def _merge_page_findings(findings: list[ModelFinding]) -> ModelFinding:
         if item.detected_document_type == primary.detected_document_type
     ]
 
-    def first_nonblank(field: str) -> Optional[str]:
-        for item in candidate_pages:
-            value = getattr(item.fields, field)
-            if value and value.strip():
-                return value.strip()
-        return None
-
-    student_name = first_nonblank("student_name")
-    date_of_birth = first_nonblank("date_of_birth")
-    registration_number = first_nonblank("registration_number")
     warnings = list(dict.fromkeys(w for item in findings for w in item.warnings))[:12]
+
+    def primary_value_unless_conflicting(field: str) -> Optional[str]:
+        primary_value = getattr(primary.fields, field)
+        normalized_primary = (
+            primary_value.strip() if primary_value and primary_value.strip() else None
+        )
+        distinct = {
+            value.strip()
+            for item in candidate_pages
+            if (value := getattr(item.fields, field)) and value.strip()
+        }
+        if len(distinct) > 1:
+            if len(warnings) < 12:
+                warnings.append(f"conflicting {field} values across document pages")
+            return None
+        return normalized_primary
+
+    student_name = primary_value_unless_conflicting("student_name")
+    date_of_birth = primary_value_unless_conflicting("date_of_birth")
+    registration_number = primary_value_unless_conflicting("registration_number")
     return ModelFinding.model_validate(
         {
             "detectedDocumentType": primary.detected_document_type,
