@@ -80,6 +80,53 @@ class LlmClient:
         cleaned = _strip_thinking_content(content).strip()
         return cleaned if cleaned else None
 
+    async def complete_multimodal(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_content: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 768,
+        timeout_seconds: Optional[float] = None,
+        response_format: Optional[dict[str, str]] = None,
+    ) -> Optional[str]:
+        """Complete a provider-neutral OpenAI-compatible multimodal request."""
+        if self._settings.ai_provider_base_url is None:
+            return None
+        base_url = str(self._settings.ai_provider_base_url).rstrip("/")
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_format is not None:
+            payload["response_format"] = response_format
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=_provider_headers(self._settings),
+            ) as response:
+                response.raise_for_status()
+                if int(response.headers.get("content-length", "0")) > 64 * 1024:
+                    raise ValueError("provider response is too large")
+                raw = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(raw) + len(chunk) > 64 * 1024:
+                        raise ValueError("provider response is too large")
+                    raw.extend(chunk)
+                body = json.loads(raw)
+        choices = body.get("choices") or []
+        content = (choices[0].get("message") or {}).get("content") if choices else None
+        return content.strip() if isinstance(content, str) and content.strip() else None
+
     async def _complete_ollama_native(
         self,
         base_url: str,

@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     ai_thread_max_threads: int = Field(default=50, ge=1, le=500)
     ai_thread_max_messages: int = Field(default=100, ge=1, le=500)
 
+    # Private document-analysis surface. Admission service is the only caller;
+    # it retains ownership of storage and applicant facts.
+    document_analysis_enabled: bool = False
+    document_analysis_internal_token: Optional[str] = None
+    document_analysis_model: str = "qwen2.5vl:7b"
+    document_analysis_schema_version: str = "1.0"
+    document_analysis_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
+    document_analysis_max_pdf_pages: int = Field(default=3, ge=1, le=10)
+    document_analysis_render_dpi: int = Field(default=144, ge=72, le=200)
+
 
 @lru_cache
 def get_settings() -> Settings:

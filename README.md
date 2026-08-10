@@ -51,3 +51,16 @@ Owner/admin factual prompts are resolved through safe tools. The service first h
 patterns deterministically, then uses the configured Qwen/OpenAI-compatible provider as an
 intent classifier for paraphrased questions. The model returns an approved tool intent only; the
 actual totals still come from `admission-service` or `payment-service`.
+
+## Private document analysis
+
+`POST /api/ai/v1/internal/document-analysis` accepts raw PNG, JPEG, or PDF
+bytes from admission-service only. It requires `DOCUMENT_ANALYSIS_ENABLED=true`,
+a Bearer token matching `DOCUMENT_ANALYSIS_INTERNAL_TOKEN`, and
+`x-expected-document-type: birth_certificate`. Configure
+`DOCUMENT_ANALYSIS_MODEL=qwen2.5vl:7b`; no external provider fallback is used.
+
+The endpoint validates signatures, image integrity, PDF encryption/page count,
+renders at a bounded DPI, invokes the configured OpenAI-compatible gateway at
+temperature zero, and validates schema `1.0`. Do not log request bodies, model
+responses, extracted fields, or raw prompts.

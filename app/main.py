@@ -1,16 +1,18 @@
 import asyncio
 import json
+import secrets
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 
 from app.auth_context import AdminContext, resolve_admin_context
 from app.config import Settings, get_settings
+from app.document_analysis import DocumentAnalysisResponse, analyze_birth_certificate
 from app.llm_client import LlmClient
 from app.policy import is_allowed_for_message, requires_privileged_role
 from app.schemas import (
@@ -97,6 +99,42 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
         admission_service_url=settings.admission_service_url,
         payment_service_url=settings.payment_service_url,
     )
+
+
+@app.post(
+    "/api/ai/v1/internal/document-analysis",
+    response_model=DocumentAnalysisResponse,
+    response_model_by_alias=True,
+)
+async def document_analysis(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    content_type: Optional[str] = Header(default=None, alias="content-type"),
+    expected_document_type: Optional[str] = Header(
+        default=None, alias="x-expected-document-type"
+    ),
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> DocumentAnalysisResponse:
+    if not settings.document_analysis_enabled:
+        raise HTTPException(status_code=503, detail="Document analysis is disabled")
+    expected_token = settings.document_analysis_internal_token
+    supplied_token = authorization.removeprefix("Bearer ") if authorization else ""
+    if not expected_token or not secrets.compare_digest(supplied_token, expected_token):
+        raise HTTPException(status_code=401, detail="Invalid internal credentials")
+    if expected_document_type != "birth_certificate":
+        raise HTTPException(status_code=422, detail="Unsupported document type")
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    try:
+        chunks = bytearray()
+        async for chunk in request.stream():
+            chunks.extend(chunk)
+            if len(chunks) > settings.document_analysis_max_bytes:
+                raise ValueError("file size is outside the allowed range")
+        return await analyze_birth_certificate(bytes(chunks), media_type, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Document analysis failed") from exc
 
 
 @app.get("/api/ai/v1/threads", response_model=ThreadListResponse)
