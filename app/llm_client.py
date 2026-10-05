@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -6,6 +7,28 @@ from typing import Optional
 import httpx
 
 from app.config import Settings
+
+
+async def _bounded_provider_json(
+    client: httpx.AsyncClient, url: str, *, payload: dict, headers: dict[str, str]
+) -> dict:
+    async with client.stream(
+        "POST", url, json=payload, headers={**headers, "Accept-Encoding": "identity"}
+    ) as response:
+        response.raise_for_status()
+        if response.headers.get("content-encoding", "identity").strip().casefold() != "identity":
+            raise ValueError("compressed provider responses are not supported")
+        if int(response.headers.get("content-length", "0")) > 65536:
+            raise ValueError("provider response is too large")
+        raw = bytearray()
+        async for chunk in response.aiter_bytes(chunk_size=8192):
+            if len(raw) + len(chunk) > 65536:
+                raise ValueError("provider response is too large")
+            raw.extend(chunk)
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("invalid provider response")
+        return body
 
 
 class LlmClient:
@@ -20,13 +43,17 @@ class LlmClient:
         max_tokens: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         response_format: Optional[dict[str, str]] = None,
+        require_complete: bool = False,
     ) -> Optional[str]:
         if self._settings.ai_provider_base_url is None:
             return None
 
+        _validate_provider_messages(self._settings, system_prompt, user_message)
         base_url = str(self._settings.ai_provider_base_url).rstrip("/")
         headers = _provider_headers(self._settings)
-        native_base_url = _ollama_native_base_url(self._settings.ai_model, base_url)
+        native_base_url = _ollama_native_base_url(
+            self._settings.ai_model, base_url, self._settings.ai_provider_protocol
+        )
         if native_base_url is not None:
             return await self._complete_ollama_native(
                 native_base_url,
@@ -37,6 +64,7 @@ class LlmClient:
                 max_tokens,
                 timeout_seconds,
                 response_format,
+                require_complete,
             )
 
         payload = {
@@ -61,16 +89,22 @@ class LlmClient:
 
         timeout = timeout_seconds or self._settings.request_timeout_seconds
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                json=payload,
-                headers=headers,
+            body = await asyncio.wait_for(
+                _bounded_provider_json(
+                    client,
+                    f"{base_url}/chat/completions",
+                    payload=payload,
+                    headers=headers,
+                ),
+                timeout=timeout,
             )
-            response.raise_for_status()
-            body = response.json()
 
         choices = body.get("choices") or []
         if not choices:
+            return None
+        if require_complete and choices[0].get("finish_reason") != "stop":
+            return None
+        if choices[0].get("finish_reason") not in (None, "stop"):
             return None
         message = choices[0].get("message") or {}
         content = message.get("content")
@@ -182,6 +216,7 @@ class LlmClient:
         max_tokens: Optional[int],
         timeout_seconds: Optional[float],
         response_format: Optional[dict[str, str]],
+        require_complete: bool = False,
     ) -> Optional[str]:
         payload = _ollama_chat_payload(
             self._settings.ai_model,
@@ -195,14 +230,20 @@ class LlmClient:
 
         timeout = timeout_seconds or self._settings.request_timeout_seconds
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{base_url}/api/chat",
-                json=payload,
-                headers=headers,
+            body = await asyncio.wait_for(
+                _bounded_provider_json(
+                    client,
+                    f"{base_url}/api/chat",
+                    payload=payload,
+                    headers=headers,
+                ),
+                timeout=timeout,
             )
-            response.raise_for_status()
-            body = response.json()
 
+        if require_complete and (body.get("done") is not True or body.get("done_reason") != "stop"):
+            return None
+        if body.get("done_reason") not in (None, "stop"):
+            return None
         message = body.get("message") or {}
         content = message.get("content")
         if not isinstance(content, str):
@@ -223,9 +264,12 @@ class LlmClient:
         if self._settings.ai_provider_base_url is None:
             return
 
+        _validate_provider_messages(self._settings, system_prompt, user_message)
         base_url = str(self._settings.ai_provider_base_url).rstrip("/")
         headers = _provider_headers(self._settings)
-        native_base_url = _ollama_native_base_url(self._settings.ai_model, base_url)
+        native_base_url = _ollama_native_base_url(
+            self._settings.ai_model, base_url, self._settings.ai_provider_protocol
+        )
         if native_base_url is not None:
             async for chunk in self._stream_ollama_native(
                 native_base_url,
@@ -356,6 +400,15 @@ def _provider_headers(settings: Settings) -> dict[str, str]:
     return headers
 
 
+def _validate_provider_messages(settings: Settings, system_prompt: str, user_message: str) -> None:
+    limit = settings.ai_provider_message_max_chars
+    if limit is not None and (
+        len(system_prompt) > limit
+        or len(_apply_model_prompt_controls(settings.ai_model, user_message)) > limit
+    ):
+        raise ValueError("provider message exceeds configured limit")
+
+
 def _ollama_chat_payload(
     model: str,
     system_prompt: str,
@@ -383,7 +436,13 @@ def _ollama_chat_payload(
     return payload
 
 
-def _ollama_native_base_url(model: str, base_url: str) -> Optional[str]:
+def _ollama_native_base_url(
+    model: str, base_url: str, protocol: str = "auto"
+) -> Optional[str]:
+    if protocol == "openai_compatible":
+        return None
+    if protocol == "ollama_native":
+        return base_url[:-3] if base_url.endswith("/v1") else base_url
     if not _is_qwen3_model(model):
         return None
     if "ollama" not in base_url.casefold() and ":11434" not in base_url:

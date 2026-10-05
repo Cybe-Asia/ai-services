@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import ValidationError
 
 from app.auth_context import AdminContext, resolve_admin_context
 from app.config import Settings, get_settings
@@ -37,6 +38,9 @@ from app.service_tools import (
     render_admissions_payments_report,
     report_request_from_export_query,
 )
+from app.student_assistant import StudentAssistantRequest, answer_student
+from app.student_context import resolve_student_context
+from app.student_discovery import DiscoveryRequest, reflect_student
 from app.thread_store import ThreadNotFound, ThreadStore
 
 app = FastAPI(
@@ -291,6 +295,56 @@ async def export_admissions_payments_report(
     )
 
 
+@app.post("/api/ai/v1/student/discovery")
+async def student_discovery(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    async def bounded_selection() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 2048:
+                raise HTTPException(413, "Student selection too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_selection(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Student selection timed out") from exc
+    try:
+        payload = DiscoveryRequest.model_validate_json(bytes(body))
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid Student selection") from exc
+    try:
+        result = await asyncio.wait_for(reflect_student(settings, authorization, payload), 28)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Student reflection unavailable") from exc
+    return Response(json.dumps(result), media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ai/v1/student/assistant")
+async def student_assistant(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 8192:
+            raise HTTPException(413, "Student question too large")
+        body.extend(chunk)
+    try:
+        payload = StudentAssistantRequest.model_validate_json(bytes(body))
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid Student question") from exc
+    result = await answer_student(settings, authorization, payload)
+    return Response(json.dumps(result), media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.post("/api/ai/v1/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
@@ -344,6 +398,11 @@ async def _prepare_chat_exchange(
 
     admin_context: Optional[AdminContext] = None
     thread_store: Optional[ThreadStore] = None
+    if payload.actor_role == ActorRole.student:
+        await resolve_student_context(settings, authorization)
+        # Student answers use the bounded, source-authorized endpoint with a final
+        # access recheck. Generic generation/SSE must not bypass that boundary.
+        raise HTTPException(403, "Use the scoped Student assistant endpoint")
     if payload.actor_role in {ActorRole.owner, ActorRole.admin}:
         admin_context = await resolve_admin_context(settings, authorization)
         payload, thread_store = await _with_server_thread_history(
