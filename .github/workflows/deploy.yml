@@ -71,7 +71,7 @@ jobs:
           timeout: 15m
       - name: Publish scanned image
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           RELEASE_IMAGE: ${{ steps.release.outputs.image }}
         run: |
           set -euo pipefail
