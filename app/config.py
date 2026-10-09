@@ -21,9 +21,21 @@ class Settings(BaseSettings):
     ai_provider_api_key: Optional[str] = None
     # Explicit deployment protocol avoids routing by model family/host naming.
     # auto retains the existing local Ollama compatibility behavior.
-    ai_provider_protocol: Literal["auto", "openai_compatible", "ollama_native"] = "auto"
+    ai_provider_protocol: Literal["auto", "openai_compatible", "ollama_native", "anthropic"] = (
+        "auto"
+    )
     ai_provider_message_max_chars: Optional[int] = Field(default=None, ge=1, le=32768)
     ai_max_tokens: int = Field(default=256, ge=1, le=2048)
+
+    # Optional provider for Student Discovery reflection only. Unset keeps it on the
+    # provider above; every other feature always stays there. The reflection prompt
+    # carries only teacher-published material and released feedback (no identity).
+    discovery_provider_protocol: Literal["openai_compatible", "anthropic"] = "anthropic"
+    discovery_provider_base_url: Optional[HttpUrl] = None
+    discovery_provider_api_key: Optional[str] = None
+    discovery_model: Optional[str] = None
+    discovery_max_tokens: int = Field(default=768, ge=1, le=2048)
+    discovery_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
 
     sis_service_url: str = "http://sis-service"
     learning_service_url: str = "https://learning-api"
@@ -48,6 +60,26 @@ class Settings(BaseSettings):
     document_analysis_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     document_analysis_max_pdf_pages: int = Field(default=3, ge=1, le=10)
     document_analysis_render_dpi: int = Field(default=144, ge=72, le=200)
+
+    def for_discovery(self) -> "Settings":
+        """Provider settings for Discovery reflection; unchanged unless fully configured."""
+        if (
+            self.discovery_provider_base_url is None
+            or not self.discovery_provider_api_key
+            or not self.discovery_model
+        ):
+            return self
+        return self.model_copy(
+            update={
+                "ai_provider_protocol": self.discovery_provider_protocol,
+                "ai_provider_base_url": self.discovery_provider_base_url,
+                "ai_provider_api_key": self.discovery_provider_api_key,
+                "ai_model": self.discovery_model,
+                "ai_max_tokens": self.discovery_max_tokens,
+                "ai_provider_message_max_chars": None,
+                "request_timeout_seconds": self.discovery_timeout_seconds,
+            }
+        )
 
     @field_validator("learning_service_url")
     @classmethod

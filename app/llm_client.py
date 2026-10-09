@@ -50,6 +50,15 @@ class LlmClient:
 
         _validate_provider_messages(self._settings, system_prompt, user_message)
         base_url = str(self._settings.ai_provider_base_url).rstrip("/")
+        if self._settings.ai_provider_protocol == "anthropic":
+            return await self._complete_anthropic(
+                base_url,
+                system_prompt,
+                user_message,
+                temperature,
+                max_tokens,
+                timeout_seconds,
+            )
         headers = _provider_headers(self._settings)
         native_base_url = _ollama_native_base_url(
             self._settings.ai_model, base_url, self._settings.ai_provider_protocol
@@ -112,6 +121,47 @@ class LlmClient:
             return None
 
         cleaned = _strip_thinking_content(content).strip()
+        return cleaned if cleaned else None
+
+    async def _complete_anthropic(
+        self,
+        base_url: str,
+        system_prompt: str,
+        user_message: str,
+        temperature: float,
+        max_tokens: Optional[int],
+        timeout_seconds: Optional[float],
+    ) -> Optional[str]:
+        """Anthropic Messages API; only a finished `end_turn` answer is released."""
+        payload = {
+            "model": self._settings.ai_model,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+            "temperature": temperature,
+            "max_tokens": max_tokens or self._settings.ai_max_tokens,
+        }
+        headers = {
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": self._settings.ai_provider_api_key or "",
+        }
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            body = await asyncio.wait_for(
+                _bounded_provider_json(
+                    client, f"{base_url}/v1/messages", payload=payload, headers=headers
+                ),
+                timeout=timeout,
+            )
+        if body.get("stop_reason") != "end_turn":
+            return None
+        blocks = body.get("content")
+        if not isinstance(blocks, list):
+            return None
+        texts = [b.get("text") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+        if not texts or not all(isinstance(t, str) for t in texts):
+            return None
+        cleaned = _without_code_fence("".join(texts))
         return cleaned if cleaned else None
 
     async def complete_multimodal(
@@ -391,6 +441,15 @@ class LlmClient:
                 cleaned = thinking_filter.flush()
                 if cleaned:
                     yield cleaned
+
+
+def _without_code_fence(text: str) -> str:
+    """A JSON answer wrapped in one Markdown code fence, as Claude sometimes returns it."""
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```") and stripped.count("```") == 2:
+        body = stripped[3:-3]
+        return body.split("\n", 1)[1] if body.startswith("json\n") else body
+    return stripped
 
 
 def _provider_headers(settings: Settings) -> dict[str, str]:

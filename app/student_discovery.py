@@ -252,7 +252,7 @@ async def reflect_student(
     original = await learning_data(settings, authorization, path, params)
     grounded, selected = evidence_context(original, context.student_id, payload)
     try:
-        answer = await LlmClient(settings).complete(
+        answer = await LlmClient(settings.for_discovery()).complete(
             system_prompt=(
                 "Return ONLY JSON {summary:[{text,refs}],reflection:[{text,refs}]}. "
                 "Use one to three short summary statements and one or two reflective questions. "
