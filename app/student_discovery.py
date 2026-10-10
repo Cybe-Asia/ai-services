@@ -110,6 +110,11 @@ def evidence_context(
         raise unavailable()
     selected: dict[str, dict] = {}
     seen: set[str] = set()
+    # A class day often holds only released Prework/post-test results; the chapter's
+    # reading the Student opened on another day still grounds that day.
+    dated = payload.day not in {"all", "undated"}
+    day_chapters: set[str] = set()
+    chapter_readings: list[tuple[str, str, dict]] = []
     for item in evidence:
         if not isinstance(item, dict) or item.get("course_id") != payload.course_id:
             raise unavailable()
@@ -172,9 +177,14 @@ def evidence_context(
                 raise unavailable()
             if not 0 <= result["score"] <= result["maximum"] or result["maximum"] <= 0:
                 raise unavailable()
-        if not selected_day(item.get("date"), payload.day):
-            continue
         safe = {"ref": reference, "title": localized(item.get("title"), payload.locale, 4000)}
+        if not selected_day(item.get("date"), payload.day):
+            if dated and source is not None and item["chapter_id"] is not None:
+                safe["reading"] = localized(source.get("body"), payload.locale)
+                chapter_readings.append((item["chapter_id"], reference, safe))
+            continue
+        if dated and item["chapter_id"] is not None:
+            day_chapters.add(item["chapter_id"])
         if source is not None:
             safe["reading"] = localized(source.get("body"), payload.locale)
         if result is not None:
@@ -190,6 +200,9 @@ def evidence_context(
             if feedback:
                 safe["released_feedback"] = feedback
         if "reading" in safe or "released_feedback" in safe:
+            selected[reference] = safe
+    for chapter, reference, safe in chapter_readings:
+        if chapter in day_chapters:
             selected[reference] = safe
     if not selected or not any("reading" in item for item in selected.values()):
         raise unavailable()

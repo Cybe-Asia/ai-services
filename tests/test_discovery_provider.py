@@ -124,3 +124,38 @@ def test_reflection_uses_the_discovery_provider(monkeypatch):
 
 async def _value(value):
     return value
+
+
+def _evidence(reading_day, result_day, other_chapter=False):
+    import copy
+
+    from tests.test_student_discovery import EVIDENCE
+
+    data = copy.deepcopy(EVIDENCE)
+    reading, result = data["courses"][0]["evidence"]
+    reading["date"], result["date"] = reading_day, result_day
+    if other_chapter:
+        reading["chapter_id"] = "other"
+    return data
+
+
+def test_a_class_day_with_only_results_is_grounded_by_that_chapters_opened_reading():
+    from tests.test_student_discovery import CONTEXT, REF
+
+    day8, day9 = 1791435600000, 1791522000000  # 8 and 9 Oct 2026, 10:00 WIB
+    payload = discovery.DiscoveryRequest(
+        class_id="class", course_id="course", day="2026-10-09", locale="en"
+    )
+    grounded, selected = discovery.evidence_context(
+        _evidence(day8, day9), CONTEXT.student_id, payload
+    )
+    assert REF in selected and "reading" in selected[REF]
+    assert len(grounded["evidence"]) == 2
+    # Another chapter's reading, or a day without any evidence, stays ungrounded.
+    for data, day in [
+        (_evidence(day8, day9, other_chapter=True), "2026-10-09"),
+        (_evidence(day8, day8), "2026-10-09"),
+    ]:
+        request = payload.model_copy(update={"day": day})
+        with pytest.raises(discovery.HTTPException):
+            discovery.evidence_context(data, CONTEXT.student_id, request)
