@@ -223,11 +223,12 @@ def test_the_gateway_path_is_untouched_by_the_openai_protocol(monkeypatch):
     assert payload["model"] == "qwen3:4b" and "max_tokens" in payload and payload["think"] is False
 
 
-def test_guarded_terms_pass_only_as_the_cited_readings_own_vocabulary():
-    ref, other = "lesson:r", "assessment:a"
+def test_guarded_terms_pass_only_as_the_supplied_readings_own_vocabulary():
+    ref, other, line = "lesson:r", "assessment:a", "lesson:line"
     selected = {
         ref: {"ref": ref, "reading": "Semakin ke kanan, semakin besar nilainya. Diskon 25%."},
-        other: {"ref": other, "released_feedback": ["Periksa tanda."]},
+        other: {"ref": other, "released_feedback": ["Nilai kamu perlu ditingkatkan."]},
+        line: {"ref": line, "reading": "Nol berada di tengah garis bilangan."},
     }
 
     def answer(text, refs, reflection_refs=None):
@@ -246,14 +247,14 @@ def test_guarded_terms_pass_only_as_the_cited_readings_own_vocabulary():
     for text in ["Skor kamu tinggi.", "Kamu menguasai materi.", "Diskon 30% dihitung."]:
         with pytest.raises(discovery.HTTPException):
             discovery.validate_synthesis(answer(text, [ref]), selected)
-    # Feedback alone never licenses a guarded term.
+    # A statement may cite a sibling reading of the same supplied material.
+    discovery.validate_synthesis(answer("Pada garis bilangan, nilai membesar.", [line]), selected)
+    # Feedback wording never licenses a guarded term.
+    del selected[ref]
     with pytest.raises(discovery.HTTPException):
         discovery.validate_synthesis(
-            json.dumps(
-                {
-                    "summary": [{"text": "Bilangan negatif di kiri nol.", "refs": [ref]}],
-                    "reflection": [{"text": "Bagaimana nilai kamu?", "refs": [other]}],
-                }
+            answer("Nol berada di tengah.", [line], reflection_refs=[other]).replace(
+                "Apa arti tanda negatif?", "Bagaimana nilai kamu?"
             ),
             selected,
         )
