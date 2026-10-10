@@ -233,13 +233,14 @@ def validate_synthesis(answer: object, selected: dict[str, dict]) -> Synthesis:
     except ValidationError as exc:
         raise unavailable() from exc
     for item in [*parsed.summary, *parsed.reflection]:
-        if (
-            not item.text.strip()
-            or len(item.text.encode()) > 1600
-            or FORBIDDEN_CLAIMS.search(item.text)
-        ):
+        if not item.text.strip() or len(item.text.encode()) > 1600:
             raise unavailable()
         if len(set(item.refs)) != len(item.refs) or any(ref not in selected for ref in item.refs):
+            raise unavailable()
+        # A guarded term is the material's own vocabulary only when a cited reading uses it
+        # (Indonesian maths says "nilai" for value); anywhere else it is a prohibited claim.
+        readings = " ".join(selected[ref].get("reading", "") for ref in item.refs).casefold()
+        if any(m.group(0).casefold() not in readings for m in FORBIDDEN_CLAIMS.finditer(item.text)):
             raise unavailable()
     if any(not any("reading" in selected[ref] for ref in item.refs) for item in parsed.summary):
         raise unavailable()

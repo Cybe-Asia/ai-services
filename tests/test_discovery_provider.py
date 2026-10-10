@@ -221,3 +221,39 @@ def test_the_gateway_path_is_untouched_by_the_openai_protocol(monkeypatch):
     payload = json.loads(seen[0].content)
     assert str(seen[0].url) == "http://gateway.local/v1/chat/completions"
     assert payload["model"] == "qwen3:4b" and "max_tokens" in payload and payload["think"] is False
+
+
+def test_guarded_terms_pass_only_as_the_cited_readings_own_vocabulary():
+    ref, other = "lesson:r", "assessment:a"
+    selected = {
+        ref: {"ref": ref, "reading": "Semakin ke kanan, semakin besar nilainya. Diskon 25%."},
+        other: {"ref": other, "released_feedback": ["Periksa tanda."]},
+    }
+
+    def answer(text, refs, reflection_refs=None):
+        return json.dumps(
+            {
+                "summary": [{"text": text, "refs": refs}],
+                "reflection": [
+                    {"text": "Apa arti tanda negatif?", "refs": reflection_refs or [ref]}
+                ],
+            }
+        )
+
+    ok = discovery.validate_synthesis(answer("Nilai bertambah ke kanan.", [ref]), selected)
+    assert ok.summary[0].text.startswith("Nilai")
+    discovery.validate_synthesis(answer("Diskon 25% dihitung dari harga.", [ref]), selected)
+    for text in ["Skor kamu tinggi.", "Kamu menguasai materi.", "Diskon 30% dihitung."]:
+        with pytest.raises(discovery.HTTPException):
+            discovery.validate_synthesis(answer(text, [ref]), selected)
+    # Feedback alone never licenses a guarded term.
+    with pytest.raises(discovery.HTTPException):
+        discovery.validate_synthesis(
+            json.dumps(
+                {
+                    "summary": [{"text": "Bilangan negatif di kiri nol.", "refs": [ref]}],
+                    "reflection": [{"text": "Bagaimana nilai kamu?", "refs": [other]}],
+                }
+            ),
+            selected,
+        )
