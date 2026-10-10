@@ -159,3 +159,65 @@ def test_a_class_day_with_only_results_is_grounded_by_that_chapters_opened_readi
         request = payload.model_copy(update={"day": day})
         with pytest.raises(discovery.HTTPException):
             discovery.evidence_context(data, CONTEXT.student_id, request)
+
+
+OPENAI = {
+    "discovery_provider_protocol": "openai",
+    "discovery_provider_base_url": "https://api.openai.example/v1",
+    "discovery_provider_api_key": "openai-key",
+    "discovery_model": "gpt-6-luna",
+}
+
+
+def test_openai_reasoning_model_contract(monkeypatch):
+    seen = []
+    body = {"choices": [{"message": {"content": '{"summary": []}'}, "finish_reason": "stop"}]}
+    capture(monkeypatch, body, seen)
+    answer = asyncio.run(
+        LlmClient(settings(**OPENAI).for_discovery()).complete(
+            "Return ONLY JSON",
+            "Material",
+            response_format={"type": "json_object"},
+            require_complete=True,
+        )
+    )
+    assert answer == '{"summary": []}'
+    request = seen[0]
+    assert str(request.url) == "https://api.openai.example/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer openai-key"
+    payload = json.loads(request.content)
+    assert payload == {
+        "model": "gpt-6-luna",
+        "messages": [
+            {"role": "system", "content": "Return ONLY JSON"},
+            {"role": "user", "content": "Material"},
+        ],
+        "max_completion_tokens": 768,
+        "reasoning_effort": "none",
+        "response_format": {"type": "json_object"},
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"choices": [{"message": {"content": "{}"}, "finish_reason": "length"}]},
+        {"choices": [{"message": {"content": "{}"}}]},
+        {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]},
+        {"choices": []},
+    ],
+)
+def test_openai_releases_only_a_finished_answer(monkeypatch, body):
+    capture(monkeypatch, body, [])
+    client = LlmClient(settings(**OPENAI).for_discovery())
+    assert asyncio.run(client.complete("System", "Material")) is None
+
+
+def test_the_gateway_path_is_untouched_by_the_openai_protocol(monkeypatch):
+    seen = []
+    capture(monkeypatch, {"choices": [{"message": {"content": "ok"}}]}, seen)
+    gateway = settings(ai_provider_protocol="openai_compatible", **OPENAI)
+    assert asyncio.run(LlmClient(gateway).complete("System", "Question")) == "ok"
+    payload = json.loads(seen[0].content)
+    assert str(seen[0].url) == "http://gateway.local/v1/chat/completions"
+    assert payload["model"] == "qwen3:4b" and "max_tokens" in payload and payload["think"] is False

@@ -60,6 +60,16 @@ class LlmClient:
                 timeout_seconds,
             )
         headers = _provider_headers(self._settings)
+        if self._settings.ai_provider_protocol == "openai":
+            return await self._complete_openai(
+                base_url,
+                headers,
+                system_prompt,
+                user_message,
+                max_tokens,
+                timeout_seconds,
+                response_format,
+            )
         native_base_url = _ollama_native_base_url(
             self._settings.ai_model, base_url, self._settings.ai_provider_protocol
         )
@@ -121,6 +131,50 @@ class LlmClient:
             return None
 
         cleaned = _strip_thinking_content(content).strip()
+        return cleaned if cleaned else None
+
+    async def _complete_openai(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        system_prompt: str,
+        user_message: str,
+        max_tokens: Optional[int],
+        timeout_seconds: Optional[float],
+        response_format: Optional[dict[str, str]],
+    ) -> Optional[str]:
+        """OpenAI Chat Completions for its reasoning models: the output limit is
+        `max_completion_tokens` and sampling controls are not sent. Only a finished
+        `stop` answer is released."""
+        payload: dict = {
+            "model": self._settings.ai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "max_completion_tokens": max_tokens or self._settings.ai_max_tokens,
+        }
+        if self._settings.ai_reasoning_effort is not None:
+            payload["reasoning_effort"] = self._settings.ai_reasoning_effort
+        if response_format is not None:
+            payload["response_format"] = response_format
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            body = await asyncio.wait_for(
+                _bounded_provider_json(
+                    client, f"{base_url}/chat/completions", payload=payload, headers=headers
+                ),
+                timeout=timeout,
+            )
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return None
+        if choices[0].get("finish_reason") != "stop":
+            return None
+        content = (choices[0].get("message") or {}).get("content")
+        if not isinstance(content, str):
+            return None
+        cleaned = _without_code_fence(content)
         return cleaned if cleaned else None
 
     async def _complete_anthropic(

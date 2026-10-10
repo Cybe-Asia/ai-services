@@ -21,20 +21,24 @@ class Settings(BaseSettings):
     ai_provider_api_key: Optional[str] = None
     # Explicit deployment protocol avoids routing by model family/host naming.
     # auto retains the existing local Ollama compatibility behavior.
-    ai_provider_protocol: Literal["auto", "openai_compatible", "ollama_native", "anthropic"] = (
-        "auto"
-    )
+    ai_provider_protocol: Literal[
+        "auto", "openai_compatible", "ollama_native", "anthropic", "openai"
+    ] = "auto"
+    # OpenAI reasoning models only; unset leaves the model's own default.
+    ai_reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high"]] = None
     ai_provider_message_max_chars: Optional[int] = Field(default=None, ge=1, le=32768)
     ai_max_tokens: int = Field(default=256, ge=1, le=2048)
 
     # Optional provider for Student Discovery reflection only. Unset keeps it on the
     # provider above; every other feature always stays there. The reflection prompt
     # carries only teacher-published material and released feedback (no identity).
-    discovery_provider_protocol: Literal["openai_compatible", "anthropic"] = "anthropic"
+    discovery_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "anthropic"
     discovery_provider_base_url: Optional[HttpUrl] = None
     discovery_provider_api_key: Optional[str] = None
     discovery_model: Optional[str] = None
     discovery_max_tokens: int = Field(default=768, ge=1, le=2048)
+    # The reflection is a short grounded rewrite; reasoning only adds latency and cost.
+    discovery_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     discovery_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
 
     sis_service_url: str = "http://sis-service"
@@ -76,6 +80,7 @@ class Settings(BaseSettings):
                 "ai_provider_api_key": self.discovery_provider_api_key,
                 "ai_model": self.discovery_model,
                 "ai_max_tokens": self.discovery_max_tokens,
+                "ai_reasoning_effort": self.discovery_reasoning_effort,
                 "ai_provider_message_max_chars": None,
                 "request_timeout_seconds": self.discovery_timeout_seconds,
             }
