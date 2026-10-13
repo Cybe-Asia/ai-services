@@ -38,6 +38,7 @@ from app.service_tools import (
     render_admissions_payments_report,
     report_request_from_export_query,
 )
+from app.student_activity import ActivityConclusionRequest, conclude_activity
 from app.student_assistant import StudentAssistantRequest, answer_student
 from app.student_context import resolve_student_context
 from app.student_discovery import DiscoveryRequest, reflect_student
@@ -321,6 +322,36 @@ async def student_discovery(
         result = await asyncio.wait_for(reflect_student(settings, authorization, payload), 28)
     except TimeoutError as exc:
         raise HTTPException(503, "Student reflection unavailable") from exc
+    return Response(json.dumps(result), media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ai/v1/student/activity-conclusion")
+async def student_activity_conclusion(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    async def bounded_session() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 2048:
+                raise HTTPException(413, "Activity session too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_session(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Activity session timed out") from exc
+    try:
+        payload = ActivityConclusionRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid activity session") from exc
+    try:
+        result = await asyncio.wait_for(conclude_activity(settings, authorization, payload), 28)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Activity conclusion unavailable") from exc
     return Response(json.dumps(result), media_type="application/json",
                     headers={"Cache-Control": "no-store"})
 

@@ -13,10 +13,11 @@
     "app/auth_context.py": "a9b524f5f9012510abb631668a2dd984add02940c88db387f18755972bf4ce19",
     "app/llm_client.py": "63171f580e794d3d6aee6e2a644d1f020a19d667b5592697567d23b138d48b8d",
     "app/service_tools.py": "8bbb6a27ab34f0f6781b0a68428e5a439cb2dc0bfaeb8064a27d06367c5895ee",
-    "app/main.py": "f252ac113f8e8e9adbea9f5a3c55ef80d02c8fff10186796e87fc75a4e1e4619",
+    "app/main.py": "dab184ddfd5080569fcdb28aecb728bb54e2c92b6443dd47809bd3e2a39dabfc",
     "requirements.txt": "9c26b3f300a91ce08768bd0eb749d581da96d99502cd30586491a71a8082c9a1",
     "Dockerfile": "1126e57e52b10d82824482f5e74a590892e05f35031e388ae2cfd73566b66d6b",
-    ".dockerignore": "31bd6a1b28b121c9add152ddbca41c3b6a9c6d4e8cab6c499ee1f5a1c0e3486d"
+    ".dockerignore": "31bd6a1b28b121c9add152ddbca41c3b6a9c6d4e8cab6c499ee1f5a1c0e3486d",
+    "app/student_activity.py": "27c9af99d9eba83bfd9b6d2a8feacbf030625510186c50bfc852b4ffb0cc7005"
   },
   "scope": "approved current web integration; school-staging; no automatic GitOps or production promotion"
 }
