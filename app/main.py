@@ -16,6 +16,7 @@ from app.config import Settings, get_settings
 from app.document_analysis import DocumentAnalysisResponse, analyze_birth_certificate
 from app.llm_client import LlmClient
 from app.policy import is_allowed_for_message, requires_privileged_role
+from app.recitation import RecitationRequest, assess_recitation
 from app.schemas import (
     ActorRole,
     ChatRequest,
@@ -323,6 +324,41 @@ async def student_discovery(
     except TimeoutError as exc:
         raise HTTPException(503, "Student reflection unavailable") from exc
     return Response(json.dumps(result), media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ai/v1/student/recitation-assessment")
+async def student_recitation_assessment(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """A recited verse's clip in, a word-by-word pre-check out; nothing is kept."""
+
+    async def bounded_clip() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 3_000_000:
+                raise HTTPException(413, "Recitation clip too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_clip(), 20)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Recitation clip timed out") from exc
+    try:
+        payload = RecitationRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid recitation clip") from exc
+    try:
+        result = await asyncio.wait_for(
+            assess_recitation(settings, authorization, payload),
+            settings.recitation_timeout_seconds + 5,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(503, "Recitation check unavailable") from exc
+    return Response(json.dumps(result, ensure_ascii=False), media_type="application/json",
                     headers={"Cache-Control": "no-store"})
 
 

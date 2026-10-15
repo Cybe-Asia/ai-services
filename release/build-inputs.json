@@ -2,7 +2,7 @@
   "files": {
     "app/student_context.py": "d912c1a38e664451eba60c9f78be9a329cd1ede59f3b85c4b39e44f4741bdc87",
     "app/student_discovery.py": "74dd73a1fa83332c7cf6eca65605d519003b2973392560967540c113a8bb78c1",
-    "app/config.py": "2578503852943b1919b1bc37fa5e328d69c0f5cc2a554c25d4fa4d4c7f1770c9",
+    "app/config.py": "2b82768889e0dda887166c49cab56ee83bf32a590073b114a00b1743b4b5acd8",
     "app/document_analysis.py": "dbd77620d4dd62c58bc39b5b06364ddcf844817f1d45cee70dcb46f2ca0bbf33",
     "app/policy.py": "4d69f0fa4436d49a6d37a9dd4a0ba5c23c17c94cbc7d4a59c39b4e59e283c853",
     "app/thread_store.py": "5d9542616b11087877248991ea5ecfc1fdc50a951316c47d11c27ec577ca70dd",
@@ -13,11 +13,14 @@
     "app/auth_context.py": "a9b524f5f9012510abb631668a2dd984add02940c88db387f18755972bf4ce19",
     "app/llm_client.py": "63171f580e794d3d6aee6e2a644d1f020a19d667b5592697567d23b138d48b8d",
     "app/service_tools.py": "8bbb6a27ab34f0f6781b0a68428e5a439cb2dc0bfaeb8064a27d06367c5895ee",
-    "app/main.py": "dab184ddfd5080569fcdb28aecb728bb54e2c92b6443dd47809bd3e2a39dabfc",
-    "requirements.txt": "9c26b3f300a91ce08768bd0eb749d581da96d99502cd30586491a71a8082c9a1",
+    "app/main.py": "721f38c38365aa91a3c3790aa9d275fad96a3747f0ebec4b5e66f46abd30f1fd",
+    "requirements.txt": "011b12f97f4d86effc0ad82ff21296ac6f927bc8f227ef6ed9baa7a8b3dfb67d",
     "Dockerfile": "1126e57e52b10d82824482f5e74a590892e05f35031e388ae2cfd73566b66d6b",
     ".dockerignore": "31bd6a1b28b121c9add152ddbca41c3b6a9c6d4e8cab6c499ee1f5a1c0e3486d",
-    "app/student_activity.py": "27c9af99d9eba83bfd9b6d2a8feacbf030625510186c50bfc852b4ffb0cc7005"
+    "app/student_activity.py": "27c9af99d9eba83bfd9b6d2a8feacbf030625510186c50bfc852b4ffb0cc7005",
+    "app/recitation.py": "e4db3b06349b021b9774a106f7e5a63dde71ca5bf0f590be5bcab13c6d69dda5",
+    "app/recitation_align.py": "247e94d6cf8abfd6e45b3b263a2ce1e6dab4e9c28a9e3d6340b46c63229baa25",
+    "app/recitation_service.py": "e4eea391d42a31614847a3022fad4e4b260829f97182402e83606825ec905e9a"
   },
   "scope": "approved current web integration; school-staging; no automatic GitOps or production promotion"
 }

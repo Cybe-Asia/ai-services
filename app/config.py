@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     discovery_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     discovery_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
 
+    # In-cluster recitation worker (app.recitation_service) for the Student tahfiz
+    # pre-check. Unset keeps the pre-check unavailable (503); no other feature uses it.
+    recitation_service_url: Optional[str] = None
+    recitation_timeout_seconds: float = Field(default=45.0, ge=5.0, le=120.0)
+
     sis_service_url: str = "http://sis-service"
     learning_service_url: str = "https://learning-api"
     admission_service_url: str = "http://admission-service"
