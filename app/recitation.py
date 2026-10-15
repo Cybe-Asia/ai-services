@@ -39,6 +39,9 @@ class Word(BaseModel):
     heard: Optional[str] = Field(max_length=64)
     status: Literal["ok", "unsure", "wrong", "missing"]
     similarity: float = Field(ge=0.0, le=1.0)
+    # Where the aligned word sits in the student's own clip, so the screen can replay it.
+    heard_start: Optional[float] = Field(default=None, ge=0.0, le=600.0)
+    heard_end: Optional[float] = Field(default=None, ge=0.0, le=600.0)
 
 
 class RecitationVerdict(BaseModel):

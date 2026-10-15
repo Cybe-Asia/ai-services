@@ -18,9 +18,9 @@
     "Dockerfile": "1126e57e52b10d82824482f5e74a590892e05f35031e388ae2cfd73566b66d6b",
     ".dockerignore": "31bd6a1b28b121c9add152ddbca41c3b6a9c6d4e8cab6c499ee1f5a1c0e3486d",
     "app/student_activity.py": "27c9af99d9eba83bfd9b6d2a8feacbf030625510186c50bfc852b4ffb0cc7005",
-    "app/recitation.py": "e4db3b06349b021b9774a106f7e5a63dde71ca5bf0f590be5bcab13c6d69dda5",
-    "app/recitation_align.py": "247e94d6cf8abfd6e45b3b263a2ce1e6dab4e9c28a9e3d6340b46c63229baa25",
-    "app/recitation_service.py": "e4eea391d42a31614847a3022fad4e4b260829f97182402e83606825ec905e9a"
+    "app/recitation.py": "1364f561232ea2de4cf8710426967d9899aa4ab817b1b878abccf56643c9f866",
+    "app/recitation_align.py": "fb281b76700c043ff770baded60c83185f8bd7165fb05bc9f978193b42e60804",
+    "app/recitation_service.py": "9af4e79e13f4da854586397d9d3b8969af390afa12e05aa14dbdd5f000713b9d"
   },
   "scope": "approved current web integration; school-staging; no automatic GitOps or production promotion"
 }

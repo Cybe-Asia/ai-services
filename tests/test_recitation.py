@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app import main, recitation
 from app.config import Settings
-from app.recitation_align import align, assessment, normalize
+from app.recitation_align import align, assessment, assessment_from_words, normalize
 from app.student_context import StudentContext
 
 AN_NAS_1 = "قُلْ أَعُوذُ بِرَبِّ ٱلنَّاسِ"
@@ -26,7 +26,15 @@ PAYLOAD = {
 VERDICT = {
     "words": [
         {"index": 0, "expected": "قل", "heard": "قل", "status": "ok", "similarity": 1.0},
-        {"index": 1, "expected": "اعوذ", "heard": "اعود", "status": "unsure", "similarity": 0.75},
+        {
+            "index": 1,
+            "expected": "اعوذ",
+            "heard": "اعود",
+            "status": "unsure",
+            "similarity": 0.75,
+            "heard_start": 0.7,
+            "heard_end": 1.4,
+        },
         {"index": 2, "expected": "برب", "heard": None, "status": "missing", "similarity": 0.0},
         {"index": 3, "expected": "الناس", "heard": "الناس", "status": "ok", "similarity": 1.0},
     ],
@@ -55,6 +63,18 @@ def test_align_statuses():
     assert align(expected, normalize("قل اعوذ الناس")).flagged == [2]
     assert align(expected, normalize("قل أعوذ برب الفلق")).verdicts[3].status == "wrong"
     assert align(["اعوذ"], ["اعود"]).verdicts[0].status == "unsure"
+
+
+def test_assessment_from_words_carries_the_timing_of_each_aligned_word():
+    words = [(" قل", 0.3, 0.6), (" أعود", 0.7, 1.4), (" الناس", 2.1, 2.9)]
+    result = assessment_from_words(AN_NAS_1, words)
+    assert [w["status"] for w in result["words"]] == ["ok", "unsure", "missing", "ok"]
+    assert result["words"][0]["heard_start"] == 0.3 and result["words"][0]["heard_end"] == 0.6
+    assert result["words"][3]["heard_start"] == 2.1
+    assert "heard_start" not in result["words"][2]
+    # a transcribed token that splits into several words shares its timing
+    split = assessment_from_words(AN_NAS_1, [("قل أعوذ", 0.0, 1.0), ("برب الناس", 1.0, 2.0)])
+    assert [w["heard_start"] for w in split["words"]] == [0.0, 0.0, 1.0, 1.0]
 
 
 def test_assessment_shape():
@@ -131,6 +151,7 @@ def test_relays_the_clip_without_identity_and_returns_the_checked_verdict(setup,
     )
     assert result["flagged"] == [2] and result["unsure"] == [1]
     assert result["words"][2]["status"] == "missing"
+    assert result["words"][1]["heard_start"] == 0.7 and result["words"][0]["heard_start"] is None
     assert "inference_seconds" not in result
     assert setup == [("context", "Bearer valid")]
 

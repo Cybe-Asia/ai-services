@@ -60,6 +60,7 @@ class Verdict:
     heard: str | None
     status: str
     similarity: float = 0.0
+    heard_index: int | None = None  # position in the heard word list, when one was aligned
 
 
 @dataclass
@@ -111,7 +112,7 @@ def align(
             e, h = expected[i - 1], heard[j - 1]
             sim = similarity(e, h)
             verdicts.append(
-                Verdict(i - 1, e, h, classify(sim, ok_threshold, unsure_threshold), sim)
+                Verdict(i - 1, e, h, classify(sim, ok_threshold, unsure_threshold), sim, j - 1)
             )
             i, j = i - 1, j - 1
         elif op == "del":
@@ -125,21 +126,43 @@ def align(
     return Alignment(verdicts, extras)
 
 
+HeardWord = tuple[str, float, float]  # text as transcribed, start and end in seconds
+
+
+def heard_tokens(words: list[HeardWord]) -> tuple[list[str], list[tuple[float, float]]]:
+    """Normalised tokens of the transcribed words with the timing of the word each came from."""
+    tokens: list[str] = []
+    timing: list[tuple[float, float]] = []
+    for text, start, end in words:
+        for token in normalize(text):
+            tokens.append(token)
+            timing.append((start, end))
+    return tokens, timing
+
+
 def assessment(expected_text: str, heard_text: str) -> dict:
-    """The JSON shape the AI service returns to the Student screen."""
-    al = align(normalize(expected_text), normalize(heard_text))
-    return {
-        "words": [
-            {
-                "index": v.index,
-                "expected": v.expected,
-                "heard": v.heard,
-                "status": v.status,
-                "similarity": round(v.similarity, 2),
-            }
-            for v in al.verdicts
-        ],
-        "extras": al.extras,
-        "flagged": al.flagged,
-        "unsure": al.unsure,
-    }
+    """The JSON shape the AI service returns to the Student screen, from a plain transcript."""
+    return assessment_from_words(expected_text, [(heard_text, 0.0, 0.0)], timed=False)
+
+
+def assessment_from_words(
+    expected_text: str, heard_words: list[HeardWord], timed: bool = True
+) -> dict:
+    """As `assessment`, with where each aligned word sits in the recording (seconds)."""
+    tokens, timing = heard_tokens(heard_words)
+    al = align(normalize(expected_text), tokens)
+    words = []
+    for v in al.verdicts:
+        word = {
+            "index": v.index,
+            "expected": v.expected,
+            "heard": v.heard,
+            "status": v.status,
+            "similarity": round(v.similarity, 2),
+        }
+        if timed and v.heard_index is not None:
+            start, end = timing[v.heard_index]
+            word["heard_start"] = round(start, 2)
+            word["heard_end"] = round(end, 2)
+        words.append(word)
+    return {"words": words, "extras": al.extras, "flagged": al.flagged, "unsure": al.unsure}

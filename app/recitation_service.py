@@ -29,7 +29,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.recitation_align import assessment
+from app.recitation_align import HeardWord, assessment_from_words
 
 SAMPLE_RATE = 16000
 MAX_BODY = 3_000_000
@@ -67,11 +67,21 @@ def decode(data: bytes) -> np.ndarray:
     return np.concatenate(out, axis=1).reshape(-1).astype(np.float32) / 32768.0
 
 
-def transcribe(audio: np.ndarray) -> str:
+def transcribe(audio: np.ndarray) -> tuple[str, list[HeardWord]]:
+    """The transcript and each word with its place in the clip, so the screen can replay a word."""
     segments, _ = State.model.transcribe(
-        audio, language="ar", beam_size=5, vad_filter=False, condition_on_previous_text=False
+        audio,
+        language="ar",
+        beam_size=5,
+        vad_filter=False,
+        condition_on_previous_text=False,
+        word_timestamps=True,
     )
-    return " ".join(segment.text.strip() for segment in segments)
+    words: list[HeardWord] = []
+    for segment in segments:
+        for word in segment.words or []:
+            words.append((word.word, float(word.start), float(word.end)))
+    return " ".join(w[0].strip() for w in words), words
 
 
 @asynccontextmanager
@@ -123,8 +133,8 @@ async def assess(request: Request) -> JSONResponse:
     assert State.semaphore is not None
     started = time.monotonic()
     async with State.semaphore:
-        heard = await asyncio.to_thread(transcribe, audio)
-    result = assessment(payload.expected_text, heard)
+        heard, words = await asyncio.to_thread(transcribe, audio)
+    result = assessment_from_words(payload.expected_text, words)
     result["heard_text"] = heard[:600]
     result["duration_seconds"] = round(seconds, 1)
     result["inference_seconds"] = round(time.monotonic() - started, 2)
