@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-FEATURE_PROVIDERS = ("discovery", "assistant", "chat")
+FEATURE_PROVIDERS = ("discovery", "assistant", "chat", "essay")
 
 
 class Settings(BaseSettings):
@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     #   prompt carries only teacher-published material, released feedback and counts.
     # - assistant: Kibo's explanation of one selected published reading.
     # - chat: Admin assist intent classification and drafting (never Student chat).
+    # - essay: Teacher essay-review suggestions (ADR 0003). Unlike the others this block has
+    #   no fallback: unset means the feature is off, because it sends student-written text.
     discovery_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "anthropic"
     discovery_provider_base_url: Optional[HttpUrl] = None
     discovery_provider_api_key: Optional[str] = None
@@ -61,6 +63,16 @@ class Settings(BaseSettings):
     chat_max_tokens: int = Field(default=512, ge=1, le=2048)
     chat_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     chat_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    essay_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
+    essay_provider_base_url: Optional[HttpUrl] = None
+    essay_provider_api_key: Optional[str] = None
+    essay_model: Optional[str] = None
+    # Up to eight criteria with quotes and reasons plus feedback; a cut answer is rejected.
+    essay_max_tokens: int = Field(default=1200, ge=1, le=2048)
+    # Grading needs more care than summarising (ADR 0003 §5).
+    essay_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
+    essay_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+
     # Admin assist: when no school tool matches an owner/admin/teacher question, answer with
     # the tool catalogue instead of a free model draft. Public chat is not affected.
     chat_open_drafting: bool = False
@@ -94,15 +106,23 @@ class Settings(BaseSettings):
     document_analysis_max_pdf_pages: int = Field(default=3, ge=1, le=10)
     document_analysis_render_dpi: int = Field(default=144, ge=72, le=200)
 
-    def for_feature(self, feature: str) -> "Settings":
-        """Provider settings for one feature; unchanged unless its block is fully configured."""
+    def feature_configured(self, feature: str) -> bool:
+        """True when the feature's provider block is complete (base URL, key and model)."""
         if feature not in FEATURE_PROVIDERS:
             raise ValueError(f"unknown feature provider: {feature}")
+        return (
+            getattr(self, f"{feature}_provider_base_url") is not None
+            and bool(getattr(self, f"{feature}_provider_api_key"))
+            and bool(getattr(self, f"{feature}_model"))
+        )
+
+    def for_feature(self, feature: str) -> "Settings":
+        """Provider settings for one feature; unchanged unless its block is fully configured."""
+        if not self.feature_configured(feature):
+            return self
         base_url = getattr(self, f"{feature}_provider_base_url")
         api_key = getattr(self, f"{feature}_provider_api_key")
         model = getattr(self, f"{feature}_model")
-        if base_url is None or not api_key or not model:
-            return self
         return self.model_copy(
             update={
                 "ai_provider_protocol": getattr(self, f"{feature}_provider_protocol"),

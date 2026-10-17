@@ -40,9 +40,17 @@ from app.student_discovery import (  # noqa: E402
     evidence_context,
     validate_synthesis,
 )
+from app.teacher_essay_review import (  # noqa: E402
+    Criterion,
+    EssayTask,
+    essay_system_prompt,
+    parse_review,
+    suggested_minor,
+)
 
 CASES = Path(__file__).resolve().parent / "cases"
-FEATURES = ("assistant", "discovery", "activity", "chat_intent")
+FEATURES = ("assistant", "discovery", "activity", "chat_intent", "essay")
+FEATURE_BLOCKS = {"chat_intent": "chat", "activity": "discovery"}
 
 
 def load(feature: str) -> list[dict]:
@@ -152,11 +160,65 @@ async def run_chat_intent(settings: Settings, case: dict) -> tuple[bool, str]:
     return ok, f"intent={intent.name}, expected {case['expect_intent']}"
 
 
+def essay_task(case: dict) -> EssayTask:
+    question = case["question"]
+    return EssayTask(
+        question_id=question["id"],
+        prompt=question["prompt"],
+        rubric=question["rubric"],
+        model_answer=question.get("model_answer"),
+        points=round(question["points"] * 100),
+        criteria=tuple(
+            Criterion(c["id"], c["description"], round(c["points"] * 100))
+            for c in question["criteria"]
+        ),
+        answer=case["answer"],
+    )
+
+
+async def run_essay(settings: Settings, case: dict) -> tuple[bool, str]:
+    """The service's prompt and validators on a fixed answer; `expect` lists the verdicts a
+    criterion may receive, `allow_rejection` accepts a validator rejection (safe outcome)."""
+    task = essay_task(case)
+    client = LlmClient(settings.for_feature("essay"))
+    answer = await client.complete(
+        system_prompt=essay_system_prompt(task, case["locale"]),
+        user_message=task.answer,
+        response_format={"type": "json_object"},
+        require_complete=True,
+        feature="eval_essay",
+    )
+    try:
+        review = parse_review(answer, task)
+    except ValueError as exc:
+        return case.get("allow_rejection", False), f"validator rejected: {exc}"
+    verdicts = {c.id: c.verdict for c in review.criteria}
+    wrong = [
+        f"{cid}={verdicts[cid]}"
+        for cid, allowed in case.get("expect", {}).items()
+        if verdicts.get(cid) not in allowed
+    ]
+    if wrong:
+        return False, "unexpected verdict " + ", ".join(wrong)
+    needs_teacher = any(v == "unclear" for v in verdicts.values())
+    expected_flag = case.get("expect_needs_teacher")
+    if expected_flag is not None and needs_teacher != expected_flag:
+        return False, f"needs_teacher={needs_teacher}, expected {expected_flag}"
+    text = (review.feedback + " " + " ".join(c.reason for c in review.criteria)).casefold()
+    for needle in case.get("must_not_contain", []):
+        if needle.casefold() in text:
+            return False, f"text contains forbidden '{needle}'"
+    score = suggested_minor(task, review) / 100
+    summary = ", ".join(f"{k}={v}" for k, v in verdicts.items())
+    return True, f"score {score}/{task.points / 100}; {summary}"
+
+
 RUNNERS = {
     "assistant": run_assistant,
     "discovery": run_discovery,
     "activity": run_activity,
     "chat_intent": run_chat_intent,
+    "essay": run_essay,
 }
 
 
@@ -190,8 +252,7 @@ async def run_feature(settings: Settings, feature: str, repeat: int) -> list[dic
 def report(rows: list[dict], settings: Settings, path: Path) -> None:
     lines = ["# AI feature evaluation", ""]
     for feature in FEATURES:
-        block = {"chat_intent": "chat", "activity": "discovery"}.get(feature, feature)
-        scoped = settings.for_feature(block)
+        scoped = settings.for_feature(FEATURE_BLOCKS.get(feature, feature))
         subset = [r for r in rows if r["feature"] == feature]
         if not subset:
             continue

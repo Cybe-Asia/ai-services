@@ -44,6 +44,7 @@ from app.student_activity import ActivityConclusionRequest, conclude_activity
 from app.student_assistant import StudentAssistantRequest, answer_student
 from app.student_context import resolve_student_context
 from app.student_discovery import DiscoveryRequest, reflect_student
+from app.teacher_essay_review import EssayReviewRequest, review_essays
 from app.thread_store import ThreadNotFound, ThreadStore
 
 app = FastAPI(
@@ -112,6 +113,7 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
         model=settings.ai_model,
         max_tokens=settings.ai_max_tokens,
         provider_configured=settings.ai_provider_base_url is not None,
+        essay_review_enabled=settings.feature_configured("essay"),
         sis_service_url=settings.sis_service_url,
         admission_service_url=settings.admission_service_url,
         payment_service_url=settings.payment_service_url,
@@ -421,6 +423,39 @@ async def student_assistant(
     result = await answer_student(settings, authorization, payload)
     return Response(json.dumps(result), media_type="application/json",
                     headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ai/v1/teacher/essay-review")
+async def teacher_essay_review(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """Per-criterion suggestions for one submitted attempt's essay answers; nothing is saved."""
+
+    async def bounded_selection() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 2048:
+                raise HTTPException(413, "Essay review selection too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_selection(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Essay review selection timed out") from exc
+    try:
+        payload = EssayReviewRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid essay review selection") from exc
+    try:
+        result = await asyncio.wait_for(review_essays(settings, authorization, payload), 55)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Essay review unavailable") from exc
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.post("/api/ai/v1/chat", response_model=ChatResponse)

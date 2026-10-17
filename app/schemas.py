@@ -117,6 +117,8 @@ class MetadataResponse(CamelModel):
     model: str
     max_tokens: int
     provider_configured: bool
+    # True when the ESSAY_* provider block is complete; clients hide the button otherwise.
+    essay_review_enabled: bool = False
     sis_service_url: str
     admission_service_url: str
     payment_service_url: str
