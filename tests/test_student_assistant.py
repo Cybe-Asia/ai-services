@@ -17,6 +17,7 @@ CONTEXT = {
 }
 PAYLOAD = {"question": "What homework do I have?", "locale": "en", "class_id": "class-one"}
 SOURCE = {"course_id": "course-one", "chapter_id": "chapter-one", "lesson_id": "reading-one"}
+ANSWERED = '{"answered": true, "text": "A fraction describes equal parts."}'
 READING = {
     "id": "reading-one",
     "title": {"en": "Fractions", "id": "Pecahan"},
@@ -242,7 +243,7 @@ def test_concept_passes_only_published_reading_and_rechecks_exact_source(api, mo
             assert "A fraction is a part." in message
             for forbidden in ["LOCKED_RECALL", "EXAMPLE_KEY", "EXAM_KEY", "student-one"]:
                 assert forbidden not in message
-            return "A fraction describes a part of a whole."
+            return '{"answered": true, "text": "A fraction describes a part of a whole."}'
 
     monkeypatch.setattr(student_assistant, "learning_data", data)
     monkeypatch.setattr(student_assistant, "LlmClient", Model)
@@ -300,7 +301,7 @@ def test_concept_wait_never_releases_changed_revoked_or_missing_source(api, monk
             pass
 
         async def complete(self, **kwargs):
-            return None if outcome == "provider_unavailable" else "Explanation"
+            return None if outcome == "provider_unavailable" else ANSWERED
 
     monkeypatch.setattr(student_assistant, "learning_data", data)
     monkeypatch.setattr(student_assistant, "LlmClient", Model)
@@ -361,10 +362,10 @@ def test_selected_reading_requires_completed_provider_answer(
 
     original = httpx.AsyncClient
     body = (
-        {"message": {"content": "A fraction describes equal parts."}, **metadata}
+        {"message": {"content": ANSWERED}, **metadata}
         if model == "qwen3:4b"
         else {
-            "choices": [{"message": {"content": "A fraction describes equal parts."}, **metadata}]
+            "choices": [{"message": {"content": ANSWERED}, **metadata}]
         }
     )
     monkeypatch.setattr(student_assistant, "learning_data", data)
@@ -389,3 +390,86 @@ def test_selected_reading_requires_completed_provider_answer(
             assert "reply" not in response.json()
     finally:
         main.app.dependency_overrides.clear()
+
+
+def _reading_data():
+    async def data(settings, authorization, path, params=None):
+        if path.endswith("/course-one"):
+            return {"id": "course-one", "class_id": "class-one", "publication": "published"}
+        return READING
+
+    return data
+
+
+@pytest.mark.parametrize(
+    "answer,expected_status,expected_text",
+    [
+        ('{"answered": false, "text": ""}', 200, "does not cover that question"),
+        ('{"answered": false}', 200, "does not cover that question"),
+        ('{"answered": true, "text": ""}', 503, None),
+        ('{"answered": true, "text": "x", "extra": 1}', 503, None),
+        ("A plain explanation without the contract.", 503, None),
+        ('{"answered": "yes", "text": "x"}', 503, None),
+    ],
+)
+def test_reading_answer_contract_gates_off_topic_and_malformed_answers(
+    api, monkeypatch, answer, expected_status, expected_text
+):
+    class Model:
+        def __init__(self, settings):
+            pass
+
+        async def complete(self, **kwargs):
+            assert kwargs["response_format"] == {"type": "json_object"}
+            assert kwargs["feature"] == "assistant"
+            assert '"answered"' in kwargs["system_prompt"]
+            return answer
+
+    monkeypatch.setattr(student_assistant, "learning_data", _reading_data())
+    monkeypatch.setattr(student_assistant, "LlmClient", Model)
+    response = api.post(
+        "/api/ai/v1/student/assistant",
+        json={**PAYLOAD, "question": "Give me a rendang recipe", "source": SOURCE},
+        headers={"Authorization": "Bearer valid-student"},
+    )
+    assert response.status_code == expected_status
+    if expected_text:
+        body = response.json()["reply"]
+        assert expected_text in body["text"]
+        assert body["source"] == "Fractions"
+        assert body["destinations"] == ["lessons"]
+    else:
+        assert "reply" not in response.json()
+
+
+def test_reading_explanation_uses_the_assistant_provider_block(api, monkeypatch):
+    seen = []
+
+    class Model:
+        def __init__(self, settings):
+            seen.append((settings.ai_model, settings.ai_provider_protocol, settings.ai_max_tokens))
+
+        async def complete(self, **kwargs):
+            return '{"answered": true, "text": "Parts of a whole."}'
+
+    monkeypatch.setattr(student_assistant, "learning_data", _reading_data())
+    monkeypatch.setattr(student_assistant, "LlmClient", Model)
+    main.app.dependency_overrides[main.get_settings] = lambda: Settings(
+        _env_file=None,
+        ai_model="qwen3:4b",
+        ai_provider_base_url="http://localhost:11434/v1",
+        assistant_provider_base_url="https://api.openai.example/v1",
+        assistant_provider_api_key="assistant-key",
+        assistant_model="gpt-6-luna",
+        assistant_max_tokens=400,
+    )
+    try:
+        response = api.post(
+            "/api/ai/v1/student/assistant",
+            json={**PAYLOAD, "question": "Explain fractions", "source": SOURCE},
+            headers={"Authorization": "Bearer valid-student"},
+        )
+    finally:
+        main.app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert seen == [("gpt-6-luna", "openai", 400)]

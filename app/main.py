@@ -15,6 +15,7 @@ from app.auth_context import AdminContext, resolve_admin_context
 from app.config import Settings, get_settings
 from app.document_analysis import DocumentAnalysisResponse, analyze_birth_certificate
 from app.llm_client import LlmClient
+from app.metrics import registry
 from app.policy import is_allowed_for_message, requires_privileged_role
 from app.recitation import RecitationRequest, assess_recitation
 from app.schemas import (
@@ -92,6 +93,16 @@ EN_MONTH_NAMES = (
 @app.get("/api/v1/ai-service/health", response_model=HealthResponse)
 async def health(settings: Settings = SETTINGS_DEPENDENCY) -> HealthResponse:
     return HealthResponse(status="ok", service=settings.service_name, environment=settings.app_env)
+
+
+@app.get("/api/v1/ai-service/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    """Per-feature call counts, latency and token usage; no prompt or output content."""
+    return Response(
+        content=registry.render(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/v1/ai-service/metadata", response_model=MetadataResponse)
@@ -526,6 +537,13 @@ async def _resolve_chat_response(
             tool_calls=_tool_calls_for_message(payload.message),
         )
 
+    if _tools_only(payload, settings):
+        return ChatResponse(
+            conversation_id=payload.conversation_id or str(uuid4()),
+            answer=_tools_catalogue_answer(),
+            tool_calls=[ToolCallRef(name="pending.safe_school_data_tool", status="not_configured")],
+        )
+
     answer = await _draft_answer(payload, settings)
     return ChatResponse(
         conversation_id=payload.conversation_id or str(uuid4()),
@@ -593,6 +611,16 @@ async def _stream_chat_events(
             answer=_fallback_answer(payload),
             sources=_sources_for_message(payload.message),
             tool_calls=_tool_calls_for_message(payload.message),
+        )
+        async for event in _stream_final_response(response, payload, thread_store, admin_context):
+            yield event
+        return
+
+    if _tools_only(payload, settings):
+        response = ChatResponse(
+            conversation_id=payload.conversation_id,
+            answer=_tools_catalogue_answer(),
+            tool_calls=[ToolCallRef(name="pending.safe_school_data_tool", status="not_configured")],
         )
         async for event in _stream_final_response(response, payload, thread_store, admin_context):
             yield event
@@ -736,13 +764,31 @@ def _context_from_payload(payload: ChatRequest) -> dict:
     return context if isinstance(context, dict) else {}
 
 
+def _tools_only(payload: ChatRequest, settings: Settings) -> bool:
+    """Admin assist answers only from school tools unless open drafting is switched on."""
+    return payload.actor_role in PRIVILEGED_DATA_ROLES and not settings.chat_open_drafting
+
+
+def _tools_catalogue_answer() -> str:
+    return (
+        "Saya menjawab dari tool data sekolah, bukan dari pengetahuan umum. "
+        "Tool yang aktif saat ini: jumlah dan daftar EOI, detail lead dan anak, "
+        "funnel lead per step, lead yang stuck, appointment, lead paid tanpa "
+        "appointment, review pembayaran, biaya pendaftaran, laporan EOI + pembayaran, "
+        "briefing operasional, dan tanggal hari ini. Untuk pertanyaan ini saya belum "
+        "menemukan tool yang tepat, jadi saya tidak akan mengarang jawaban. "
+        "Coba tanyakan salah satu data itu."
+    )
+
+
 async def _draft_answer(payload: ChatRequest, settings: Settings) -> str:
     local_fallback = _fallback_answer(payload)
-    client = LlmClient(settings)
+    client = LlmClient(settings.for_feature("chat"))
     try:
         generated = await client.complete(
             system_prompt=_draft_system_prompt(),
             user_message=_draft_user_message(payload),
+            feature="chat_draft",
         )
     except Exception:
         generated = None
@@ -753,12 +799,14 @@ async def _draft_answer_chunks(
     payload: ChatRequest,
     settings: Settings,
 ) -> AsyncIterator[str]:
-    client = LlmClient(settings)
-    stream_timeout = min(settings.request_timeout_seconds, DRAFT_STREAM_CHUNK_TIMEOUT_SECONDS)
+    scoped = settings.for_feature("chat")
+    client = LlmClient(scoped)
+    stream_timeout = min(scoped.request_timeout_seconds, DRAFT_STREAM_CHUNK_TIMEOUT_SECONDS)
     stream = client.stream_complete(
         system_prompt=_draft_system_prompt(),
         user_message=_draft_user_message(payload),
         timeout_seconds=stream_timeout,
+        feature="chat_draft",
     )
     try:
         while True:

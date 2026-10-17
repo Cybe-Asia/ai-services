@@ -1869,7 +1869,9 @@ def test_owner_paraphrased_registration_count_uses_llm_classifier(monkeypatch) -
             max_tokens=None,
             timeout_seconds=None,
             response_format=None,
+            feature=None,
         ):
+            assert feature == "chat_intent"
             assert "Return JSON only" in system_prompt
             assert user_message == "berapa calon keluarga masuk sejauh ini?"
             assert temperature == 0.0
@@ -3006,7 +3008,9 @@ def test_owner_paraphrased_payment_count_uses_llm_classifier(monkeypatch) -> Non
             max_tokens=None,
             timeout_seconds=None,
             response_format=None,
+            feature=None,
         ):
+            assert feature == "chat_intent"
             assert "paymentStatus" in system_prompt
             assert user_message == "berapa transaksi yang masih perlu dicek finance?"
             assert temperature == 0.0
@@ -3202,3 +3206,78 @@ def test_funnel_question_is_not_answered_for_public_role(monkeypatch) -> None:
     )
 
     assert result is None
+
+
+def test_admin_general_question_without_tool_answers_from_catalogue(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+    calls = []
+
+    class ClassifierOnlyLlmClient:
+        def __init__(self, settings):
+            pass
+
+        async def complete(self, *args, **kwargs):
+            calls.append(kwargs.get("feature"))
+            assert kwargs.get("feature") == "chat_intent", "open drafting is off for staff"
+            return '{"intent":"none"}'
+
+        async def stream_complete(self, *args, **kwargs):
+            raise AssertionError("open drafting is off for staff")
+            yield ""
+
+    monkeypatch.setattr(main_module, "LlmClient", ClassifierOnlyLlmClient)
+    monkeypatch.setattr(service_tools, "LlmClient", ClassifierOnlyLlmClient)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, ai_provider_base_url="http://localhost:11434/v1"
+    )
+    try:
+        for path in ("/api/ai/v1/chat", "/api/ai/v1/chat/stream"):
+            response = client.post(
+                path,
+                headers={"authorization": "Bearer test-token"},
+                json={"message": "resep rendang yang enak gimana?", "actorRole": "admin"},
+            )
+            assert response.status_code == 200
+            text = response.text if path.endswith("stream") else response.json()["answer"]
+            assert "tool data sekolah" in text
+            assert "rendang" not in text
+    finally:
+        app.dependency_overrides.clear()
+    assert calls == ["chat_intent", "chat_intent"]
+
+
+def test_admin_open_drafting_can_be_switched_on_and_uses_the_chat_block(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "resolve_admin_context", fake_admin_context)
+    seen = []
+
+    class RecordingLlmClient:
+        def __init__(self, settings):
+            seen.append((settings.ai_model, settings.ai_provider_protocol))
+
+        async def complete(self, *args, **kwargs):
+            if kwargs.get("feature") == "chat_intent":
+                return '{"intent":"none"}'
+            assert kwargs.get("feature") == "chat_draft"
+            return "Draf jawaban umum."
+
+    monkeypatch.setattr(main_module, "LlmClient", RecordingLlmClient)
+    monkeypatch.setattr(service_tools, "LlmClient", RecordingLlmClient)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        ai_provider_base_url="http://localhost:11434/v1",
+        chat_open_drafting=True,
+        chat_provider_base_url="https://api.openai.example/v1",
+        chat_provider_api_key="chat-key",
+        chat_model="gpt-6-luna",
+    )
+    try:
+        response = client.post(
+            "/api/ai/v1/chat",
+            headers={"authorization": "Bearer test-token"},
+            json={"message": "resep rendang yang enak gimana?", "actorRole": "admin"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Draf jawaban umum."
+    assert seen == [("gpt-6-luna", "openai"), ("gpt-6-luna", "openai")]

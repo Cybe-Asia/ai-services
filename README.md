@@ -64,3 +64,47 @@ The endpoint validates signatures, image integrity, PDF encryption/page count,
 renders at a bounded DPI, invokes the configured OpenAI-compatible gateway at
 temperature zero, and validates schema `1.0`. Do not log request bodies, model
 responses, extracted fields, or raw prompts.
+
+## Per-feature providers, metrics and evaluation
+
+Every feature calls the same `LlmClient`; which provider answers is configuration only.
+`AI_PROVIDER_*` is the main provider (the on-prem gateway). Three features can be moved to
+their own provider by setting a complete block; an incomplete block leaves that feature on
+the main provider and changes nothing else:
+
+| Block | Features | Variables |
+|---|---|---|
+| `DISCOVERY_*` | Student Discovery reflection, Activity Arena conclusion | `DISCOVERY_PROVIDER_PROTOCOL`, `DISCOVERY_PROVIDER_BASE_URL`, `DISCOVERY_PROVIDER_API_KEY`, `DISCOVERY_MODEL`, `DISCOVERY_MAX_TOKENS`, `DISCOVERY_REASONING_EFFORT`, `DISCOVERY_TIMEOUT_SECONDS` |
+| `ASSISTANT_*` | Kibo: explanation of one selected published reading | same names with the `ASSISTANT_` prefix |
+| `CHAT_*` | Admin assist: intent classification and drafting | same names with the `CHAT_` prefix |
+
+Protocols: `openai` (Chat Completions with `max_completion_tokens` and `reasoning_effort`),
+`anthropic` (Messages API) and `openai_compatible` (the gateway or a local model; JSON mode
+is sent as `response_format: json_object`, qwen3 gets `think: false`). Moving a feature means
+changing those four values and restarting; the model still has to pass the feature's eval set
+(below), because JSON mode and reasoning controls differ between models.
+
+Kibo's explanation returns `{"answered": bool, "text": string}`: when the selected reading
+does not cover the question, or the question is not about the reading, the student gets a
+fixed "choose another reading" reply instead of a model answer.
+
+`CHAT_OPEN_DRAFTING` (default `false`): when no school tool matches an owner/admin/teacher
+question, Admin assist answers with the tool catalogue instead of a free model draft. Public
+chat keeps drafting. Set `true` to restore open drafting for staff.
+
+`GET /api/v1/ai-service/metrics` exposes Prometheus text: `ai_feature_calls_total` (per
+feature and call outcome: ok, empty, timeout, error), `ai_feature_call_seconds` (histogram),
+`ai_feature_tokens_total` (when the provider reports usage) and `ai_feature_outcomes_total`
+(after validation: ok, validation_failed, not_answered). Counts only; never prompt or output
+text.
+
+`tools/ai-eval/run.py` runs each feature's prompt and validators against the provider in the
+environment with fixed cases (normal, off-topic, answer-key requests, prompt injection):
+
+```bash
+AI_PROVIDER_BASE_URL=http://127.0.0.1:11434/v1 AI_MODEL=qwen3:4b \
+  python tools/ai-eval/run.py --feature all --report docs/evidence/ai-eval-<date>.md
+```
+
+Run it after every model or prompt change; the report lists pass/fail per case with latency
+and token counts.

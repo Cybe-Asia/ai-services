@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Optional
@@ -7,6 +8,7 @@ from typing import Optional
 import httpx
 
 from app.config import Settings
+from app.metrics import registry, usage_from_body
 
 
 async def _bounded_provider_json(
@@ -34,8 +36,87 @@ async def _bounded_provider_json(
 class LlmClient:
     def __init__(self, settings: Settings):
         self._settings = settings
+        # Token usage of the last provider call, when the provider reported it.
+        self.last_usage: Optional[dict] = None
+
+    async def _json(
+        self, client: httpx.AsyncClient, url: str, *, payload: dict, headers: dict[str, str]
+    ) -> dict:
+        body = await _bounded_provider_json(client, url, payload=payload, headers=headers)
+        self.last_usage = usage_from_body(body)
+        return body
+
+    async def _metered(self, feature: str, call):
+        """Record one provider call's outcome, wall time and usage; never its content."""
+        self.last_usage = None
+        started = time.monotonic()
+        outcome = "error"
+        try:
+            result = await call
+            outcome = "ok" if result else "empty"
+            return result
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            outcome = "timeout"
+            raise
+        finally:
+            registry.observe_call(feature, outcome, time.monotonic() - started, self.last_usage)
 
     async def complete(
+        self,
+        system_prompt: str,
+        user_message: str,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
+        response_format: Optional[dict[str, str]] = None,
+        require_complete: bool = False,
+        feature: str = "unknown",
+    ) -> Optional[str]:
+        return await self._metered(
+            feature,
+            self._complete_unmetered(
+                system_prompt,
+                user_message,
+                temperature,
+                max_tokens,
+                timeout_seconds,
+                response_format,
+                require_complete,
+            ),
+        )
+
+    async def stream_complete(
+        self,
+        system_prompt: str,
+        user_message: str,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
+        response_format: Optional[dict[str, str]] = None,
+        feature: str = "unknown",
+    ) -> AsyncIterator[str]:
+        started = time.monotonic()
+        outcome = "error"
+        produced = False
+        try:
+            async for chunk in self._stream_unmetered(
+                system_prompt,
+                user_message,
+                temperature,
+                max_tokens,
+                timeout_seconds,
+                response_format,
+            ):
+                produced = True
+                yield chunk
+            outcome = "ok" if produced else "empty"
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            outcome = "timeout"
+            raise
+        finally:
+            registry.observe_call(feature, outcome, time.monotonic() - started, None)
+
+    async def _complete_unmetered(
         self,
         system_prompt: str,
         user_message: str,
@@ -109,7 +190,7 @@ class LlmClient:
         timeout = timeout_seconds or self._settings.request_timeout_seconds
         async with httpx.AsyncClient(timeout=timeout) as client:
             body = await asyncio.wait_for(
-                _bounded_provider_json(
+                self._json(
                     client,
                     f"{base_url}/chat/completions",
                     payload=payload,
@@ -161,7 +242,7 @@ class LlmClient:
         timeout = timeout_seconds or self._settings.request_timeout_seconds
         async with httpx.AsyncClient(timeout=timeout) as client:
             body = await asyncio.wait_for(
-                _bounded_provider_json(
+                self._json(
                     client, f"{base_url}/chat/completions", payload=payload, headers=headers
                 ),
                 timeout=timeout,
@@ -202,7 +283,7 @@ class LlmClient:
         timeout = timeout_seconds or self._settings.request_timeout_seconds
         async with httpx.AsyncClient(timeout=timeout) as client:
             body = await asyncio.wait_for(
-                _bounded_provider_json(
+                self._json(
                     client, f"{base_url}/v1/messages", payload=payload, headers=headers
                 ),
                 timeout=timeout,
@@ -219,6 +300,16 @@ class LlmClient:
         return cleaned if cleaned else None
 
     async def complete_multimodal(
+        self, *, feature: str = "document", **kwargs
+    ) -> Optional[str]:
+        return await self._metered(feature, self._complete_multimodal_unmetered(**kwargs))
+
+    async def complete_gateway_vision(
+        self, *, feature: str = "document", **kwargs
+    ) -> Optional[str]:
+        return await self._metered(feature, self._complete_gateway_vision_unmetered(**kwargs))
+
+    async def _complete_multimodal_unmetered(
         self,
         *,
         model: str,
@@ -265,7 +356,7 @@ class LlmClient:
         content = (choices[0].get("message") or {}).get("content") if choices else None
         return content.strip() if isinstance(content, str) and content.strip() else None
 
-    async def complete_gateway_vision(
+    async def _complete_gateway_vision_unmetered(
         self,
         *,
         model: str,
@@ -335,7 +426,7 @@ class LlmClient:
         timeout = timeout_seconds or self._settings.request_timeout_seconds
         async with httpx.AsyncClient(timeout=timeout) as client:
             body = await asyncio.wait_for(
-                _bounded_provider_json(
+                self._json(
                     client,
                     f"{base_url}/api/chat",
                     payload=payload,
@@ -356,7 +447,7 @@ class LlmClient:
         cleaned = _strip_thinking_content(content).strip()
         return cleaned if cleaned else None
 
-    async def stream_complete(
+    async def _stream_unmetered(
         self,
         system_prompt: str,
         user_message: str,

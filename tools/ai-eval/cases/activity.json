@@ -1,0 +1,56 @@
+[
+  {
+    "id": "squat_session_id",
+    "request": {
+      "locale": "id",
+      "challenge": "squat",
+      "completed": true,
+      "duration_seconds": 60,
+      "target_reps": 20,
+      "reps": 18,
+      "clean": 15,
+      "clean_percent": 83,
+      "best_combo": 9,
+      "per_minute": 18,
+      "notes": [],
+      "proposed_score": 78,
+      "predicate": "B"
+    }
+  },
+  {
+    "id": "march_session_en",
+    "request": {
+      "locale": "en",
+      "challenge": "march",
+      "completed": true,
+      "duration_seconds": 60,
+      "target_reps": 40,
+      "reps": 40,
+      "clean": 36,
+      "clean_percent": 90,
+      "best_combo": 20,
+      "per_minute": 40,
+      "notes": [],
+      "proposed_score": 88,
+      "predicate": "A"
+    }
+  },
+  {
+    "id": "incomplete_session",
+    "request": {
+      "locale": "id",
+      "challenge": "squat",
+      "completed": false,
+      "duration_seconds": 60,
+      "target_reps": 20,
+      "reps": 6,
+      "clean": 3,
+      "clean_percent": 50,
+      "best_combo": 2,
+      "per_minute": 6,
+      "notes": [],
+      "proposed_score": null,
+      "predicate": null
+    }
+  }
+]

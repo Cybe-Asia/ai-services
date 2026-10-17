@@ -472,11 +472,9 @@ def _contextual_tool_intent(
     return ToolIntent(INTENT_NONE)
 
 
-async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
-    if settings.ai_provider_base_url is None:
-        return ToolIntent(INTENT_NONE)
-
-    system_prompt = (
+def tool_intent_system_prompt() -> str:
+    """Admin assist intent classification; shared with the offline evaluation runner."""
+    return (
         "Return JSON only. Classify Digital Schools admin questions into tool intent. "
         "If user asks count/total/jumlah/berapa of calon keluarga, families, applicants, "
         "registrations, leads, EOI, or registered emails, use admission_eoi_count. "
@@ -492,8 +490,8 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         "campus tour, or staff availability lists, use admission_appointments_list. "
         "If user asks paid leads or paid EOIs without an appointment/booking/schedule, "
         "use admission_paid_leads_without_appointment. "
-        "If user asks the funnel, pipeline, or per-step breakdown of leads, "
-        "use admission_funnel. "
+        "If user asks the funnel, pipeline, per-step/per-tahap breakdown of leads, or how many "
+        "leads sit at each step (tahap) of pendaftaran, use admission_funnel. "
         "If user asks which or how many leads are stuck, stalled, macet, or not moving "
         "between steps, use admission_stuck_leads. "
         "If user asks full details of a specific payment row, use payment_review_detail. "
@@ -520,14 +518,21 @@ async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
         'Example: "berapa harga admissions?" => {"intent":"payment_application_fee_quote"}.'
     )
 
+
+async def _classify_tool_intent(message: str, settings: Settings) -> ToolIntent:
+    scoped = settings.for_feature("chat")
+    if scoped.ai_provider_base_url is None:
+        return ToolIntent(INTENT_NONE)
+
     try:
-        raw_intent = await LlmClient(settings).complete(
-            system_prompt=system_prompt,
+        raw_intent = await LlmClient(scoped).complete(
+            system_prompt=tool_intent_system_prompt(),
             user_message=message,
             temperature=0.0,
             max_tokens=32,
-            timeout_seconds=60.0,
+            timeout_seconds=min(60.0, scoped.request_timeout_seconds * 2),
             response_format={"type": "json_object"},
+            feature="chat_intent",
         )
     except Exception:
         return ToolIntent(INTENT_NONE)
