@@ -92,12 +92,28 @@ and non-essay questions, are not listed. `flags` ⊆ `needs_teacher`, `validatio
 | 413 / 422 | Body too large / invalid selection |
 | 503 | Learning unavailable, malformed projection, or every model call failed; also the 55 s overall limit |
 
+## Internal endpoint for Learning (ADR 0010)
+
+`POST /api/ai/v1/internal/essay-review`, bearer = `ESSAY_INTERNAL_TOKEN` (shared with
+learning-api, which calls it in the background when a student submits an attempt). Body:
+
+```json
+{"locale": "id", "questions": [{"question_id": "…", "prompt": "…", "rubric": "…",
+  "model_answer": "…", "points": 10,
+  "criteria": [{"id": "bahan", "description": "…", "points": 4}], "answer": "…"}]}
+```
+
+Same prompt, validation and scoring as the teacher endpoint; the response has the same
+`questions[]` shape (no `attempt_id`/`revision`). Nothing is read from Learning and nothing
+is kept. 401 without the token, 404 when the `ESSAY_*` block is unset, 422 for malformed
+tasks (criteria must add up to the points), 503 when every model call failed.
+
 ## Configuration
 
 `ESSAY_PROVIDER_PROTOCOL` (`openai` default | `anthropic` | `openai_compatible`),
 `ESSAY_PROVIDER_BASE_URL`, `ESSAY_PROVIDER_API_KEY`, `ESSAY_MODEL`, `ESSAY_MAX_TOKENS`
 (default 1200), `ESSAY_REASONING_EFFORT` (default `low`), `ESSAY_TIMEOUT_SECONDS`
-(default 30). All three of URL, key and model must be set; otherwise the endpoint answers 404
+(default 30), `ESSAY_INTERNAL_TOKEN` (internal endpoint only). All three of URL, key and model must be set; otherwise the endpoint answers 404
 and `GET /api/v1/ai-service/metadata` reports `essayReviewEnabled: false`, which the Teacher
 web uses to hide the button. There is deliberately no fallback to the main provider.
 

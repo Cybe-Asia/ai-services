@@ -470,3 +470,88 @@ def test_forbidden_claims_filter_targets_the_student_not_the_text():
         "Score 7/10",
     ):
         assert essay.FORBIDDEN_CLAIMS.search(text), text
+
+
+INTERNAL = {
+    "locale": "en",
+    "questions": [
+        {
+            "question_id": "essay",
+            "prompt": "Explain photosynthesis",
+            "rubric": "Inputs, outputs and location",
+            "model_answer": "Light, water and CO2 become sugar and oxygen.",
+            "points": 10,
+            "criteria": [
+                {"id": "inputs", "description": "Names light, water and CO2", "points": 4},
+                {"id": "outputs", "description": "Names sugar and oxygen", "points": 4},
+                {"id": "where", "description": "Names the chloroplast", "points": 2},
+            ],
+            "answer": ANSWER_TEXT,
+        }
+    ],
+}
+
+
+def test_internal_review_needs_the_shared_token_and_the_feature(setup):
+    client = TestClient(main.app)
+    main.app.dependency_overrides[main.get_settings] = lambda: settings(
+        essay_internal_token="learning-token"
+    )
+    try:
+        assert client.post("/api/ai/v1/internal/essay-review", json=INTERNAL).status_code == 401
+        headers = {"Authorization": "Bearer wrong"}
+        assert (
+            client.post("/api/ai/v1/internal/essay-review", json=INTERNAL, headers=headers)
+        ).status_code == 401
+        headers = {"Authorization": "Bearer learning-token"}
+        response = client.post("/api/ai/v1/internal/essay-review", json=INTERNAL, headers=headers)
+        assert response.status_code == 200
+        [question] = response.json()["questions"]
+        assert question["suggested_score"] == 8 and question["needs_teacher"] is False
+        assert question["criteria"][1]["evidence"] == ["into sugar", "releases oxygen"]
+        # Learning does not read anything back; only the model was called.
+        assert setup["reads"] == [] and len(setup["prompts"]) == 1
+        main.app.dependency_overrides[main.get_settings] = lambda: Settings(
+            _env_file=None, essay_internal_token="learning-token"
+        )
+        response = client.post("/api/ai/v1/internal/essay-review", json=INTERNAL, headers=headers)
+        assert response.status_code == 404
+        main.app.dependency_overrides[main.get_settings] = lambda: settings()
+        response = client.post("/api/ai/v1/internal/essay-review", json=INTERNAL, headers=headers)
+        assert response.status_code == 401
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"questions": []},
+        {"questions": [{**INTERNAL["questions"][0], "criteria": []}]},
+        {
+            "questions": [
+                {
+                    **INTERNAL["questions"][0],
+                    "criteria": [{"id": "only", "description": "x", "points": 3}],
+                }
+            ]
+        },
+        {"questions": [INTERNAL["questions"][0], INTERNAL["questions"][0]]},
+        {"questions": [{**INTERNAL["questions"][0], "student_id": "s"}]},
+    ],
+)
+def test_internal_review_refuses_malformed_tasks(setup, change):
+    client = TestClient(main.app)
+    main.app.dependency_overrides[main.get_settings] = lambda: settings(
+        essay_internal_token="learning-token"
+    )
+    try:
+        response = client.post(
+            "/api/ai/v1/internal/essay-review",
+            json={**INTERNAL, **change},
+            headers={"Authorization": "Bearer learning-token"},
+        )
+        assert response.status_code == 422
+        assert setup["prompts"] == []
+    finally:
+        main.app.dependency_overrides.clear()

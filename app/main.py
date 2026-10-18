@@ -44,7 +44,12 @@ from app.student_activity import ActivityConclusionRequest, conclude_activity
 from app.student_assistant import StudentAssistantRequest, answer_student
 from app.student_context import resolve_student_context
 from app.student_discovery import DiscoveryRequest, reflect_student
-from app.teacher_essay_review import EssayReviewRequest, review_essays
+from app.teacher_essay_review import (
+    EssayReviewRequest,
+    InternalEssayReviewRequest,
+    review_essays,
+    review_internal,
+)
 from app.thread_store import ThreadNotFound, ThreadStore
 
 app = FastAPI(
@@ -129,9 +134,7 @@ async def document_analysis(
     request: Request,
     authorization: Optional[str] = AUTH_HEADER,
     content_type: Optional[str] = Header(default=None, alias="content-type"),
-    expected_document_type: Optional[str] = Header(
-        default=None, alias="x-expected-document-type"
-    ),
+    expected_document_type: Optional[str] = Header(default=None, alias="x-expected-document-type"),
     settings: Settings = SETTINGS_DEPENDENCY,
 ) -> DocumentAnalysisResponse:
     if not settings.document_analysis_enabled:
@@ -336,8 +339,9 @@ async def student_discovery(
         result = await asyncio.wait_for(reflect_student(settings, authorization, payload), 28)
     except TimeoutError as exc:
         raise HTTPException(503, "Student reflection unavailable") from exc
-    return Response(json.dumps(result), media_type="application/json",
-                    headers={"Cache-Control": "no-store"})
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.post("/api/ai/v1/student/recitation-assessment")
@@ -371,8 +375,11 @@ async def student_recitation_assessment(
         )
     except TimeoutError as exc:
         raise HTTPException(503, "Recitation check unavailable") from exc
-    return Response(json.dumps(result, ensure_ascii=False), media_type="application/json",
-                    headers={"Cache-Control": "no-store"})
+    return Response(
+        json.dumps(result, ensure_ascii=False),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/ai/v1/student/activity-conclusion")
@@ -401,8 +408,9 @@ async def student_activity_conclusion(
         result = await asyncio.wait_for(conclude_activity(settings, authorization, payload), 28)
     except TimeoutError as exc:
         raise HTTPException(503, "Activity conclusion unavailable") from exc
-    return Response(json.dumps(result), media_type="application/json",
-                    headers={"Cache-Control": "no-store"})
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.post("/api/ai/v1/student/assistant")
@@ -421,8 +429,9 @@ async def student_assistant(
     except ValidationError as exc:
         raise HTTPException(422, "Invalid Student question") from exc
     result = await answer_student(settings, authorization, payload)
-    return Response(json.dumps(result), media_type="application/json",
-                    headers={"Cache-Control": "no-store"})
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.post("/api/ai/v1/teacher/essay-review")
@@ -451,6 +460,43 @@ async def teacher_essay_review(
         raise HTTPException(422, "Invalid essay review selection") from exc
     try:
         result = await asyncio.wait_for(review_essays(settings, authorization, payload), 55)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Essay review unavailable") from exc
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/api/ai/v1/internal/essay-review")
+async def internal_essay_review(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """Learning's call at submit time (ADR 0010); bearer is the shared internal token."""
+    expected = settings.essay_internal_token
+    supplied = authorization.removeprefix("Bearer ") if authorization else ""
+    if not expected or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(401, "Invalid internal credentials")
+
+    async def bounded_body() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 2_000_000:
+                raise HTTPException(413, "Essay review request too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_body(), 10)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Essay review request timed out") from exc
+    try:
+        payload = InternalEssayReviewRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid essay review request") from exc
+    try:
+        result = await asyncio.wait_for(review_internal(settings, payload), 110)
     except TimeoutError as exc:
         raise HTTPException(503, "Essay review unavailable") from exc
     return Response(
@@ -561,10 +607,7 @@ async def _resolve_chat_response(
             tool_calls=tool_response.tool_calls,
         )
 
-    if (
-        payload.actor_role in PRIVILEGED_DATA_ROLES
-        and requires_privileged_role(payload.message)
-    ):
+    if payload.actor_role in PRIVILEGED_DATA_ROLES and requires_privileged_role(payload.message):
         return ChatResponse(
             conversation_id=payload.conversation_id or str(uuid4()),
             answer=_fallback_answer(payload),
@@ -637,10 +680,7 @@ async def _stream_chat_events(
             yield event
         return
 
-    if (
-        payload.actor_role in PRIVILEGED_DATA_ROLES
-        and requires_privileged_role(payload.message)
-    ):
+    if payload.actor_role in PRIVILEGED_DATA_ROLES and requires_privileged_role(payload.message):
         response = ChatResponse(
             conversation_id=payload.conversation_id,
             answer=_fallback_answer(payload),

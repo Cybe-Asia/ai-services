@@ -77,7 +77,7 @@ the main provider and changes nothing else:
 | `DISCOVERY_*` | Student Discovery reflection, Activity Arena conclusion | `DISCOVERY_PROVIDER_PROTOCOL`, `DISCOVERY_PROVIDER_BASE_URL`, `DISCOVERY_PROVIDER_API_KEY`, `DISCOVERY_MODEL`, `DISCOVERY_MAX_TOKENS`, `DISCOVERY_REASONING_EFFORT`, `DISCOVERY_TIMEOUT_SECONDS` |
 | `ASSISTANT_*` | Kibo: explanation of one selected published reading | same names with the `ASSISTANT_` prefix |
 | `CHAT_*` | Admin assist: intent classification and drafting | same names with the `CHAT_` prefix |
-| `ESSAY_*` | Teacher essay-review suggestions (`POST /api/ai/v1/teacher/essay-review`, see `docs/essay-review.md`) | same names with the `ESSAY_` prefix; **no fallback**: an incomplete block turns the feature off (404, `essayReviewEnabled: false` in metadata) because it sends student-written text |
+| `ESSAY_*` | Teacher essay-review suggestions (`POST /api/ai/v1/teacher/essay-review`) and Learning's submit-time call (`POST /api/ai/v1/internal/essay-review`, bearer `ESSAY_INTERNAL_TOKEN`), see `docs/essay-review.md` | same names with the `ESSAY_` prefix; **no fallback**: an incomplete block turns the feature off (404, `essayReviewEnabled: false` in metadata) because it sends student-written text |
 
 Protocols: `openai` (Chat Completions with `max_completion_tokens` and `reasoning_effort`),
 `anthropic` (Messages API) and `openai_compatible` (the gateway or a local model; JSON mode

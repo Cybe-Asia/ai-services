@@ -56,6 +56,32 @@ class EssayReviewRequest(BaseModel):
     locale: Literal["en", "id"] = "id"
 
 
+class InternalCriterion(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    id: str = Field(pattern=ID_PATTERN)
+    description: str = Field(min_length=1, max_length=4000)
+    points: float = Field(gt=0, le=1000)
+
+
+class InternalQuestion(BaseModel):
+    """One essay answer as Learning holds it; no student identity travels with it."""
+
+    model_config = ConfigDict(extra="forbid")
+    question_id: str = Field(pattern=ID_PATTERN)
+    prompt: str = Field(min_length=1, max_length=16000)
+    rubric: str = Field(min_length=1, max_length=16000)
+    model_answer: Optional[str] = Field(default=None, max_length=16000)
+    points: float = Field(gt=0, le=1000)
+    criteria: list[InternalCriterion] = Field(min_length=1, max_length=MAX_CRITERIA)
+    answer: str = Field(max_length=32000)
+
+
+class InternalEssayReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    locale: Literal["en", "id"] = "id"
+    questions: list[InternalQuestion] = Field(min_length=1, max_length=50)
+
+
 class CriterionVerdict(BaseModel):
     """One criterion as the model returns it; `evidence` is re-anchored to the answer later."""
 
@@ -351,6 +377,44 @@ async def suggest_one(client: LlmClient, task: EssayTask, locale: str, model: st
         return suggestion(task, None, ["validation_failed"], model)
     registry.count(FEATURE, "ok")
     return suggestion(task, review, [], model)
+
+
+def internal_task(question: InternalQuestion) -> EssayTask:
+    criteria = tuple(Criterion(c.id, c.description, minor(c.points)) for c in question.criteria)
+    points = minor(question.points)
+    if len({c.id for c in criteria}) != len(criteria) or sum(c.points for c in criteria) != points:
+        raise HTTPException(422, "Criteria points must add up to the question points")
+    return EssayTask(
+        question_id=question.question_id,
+        prompt=question.prompt,
+        rubric=question.rubric,
+        model_answer=question.model_answer,
+        points=points,
+        criteria=criteria,
+        answer=question.answer,
+    )
+
+
+async def review_internal(settings: Settings, payload: InternalEssayReviewRequest) -> dict:
+    """Learning's server-side call at submit time (ADR 0010): same model, prompt, validation
+    and scoring as the teacher endpoint, on tasks supplied directly; nothing is read or kept."""
+    if not settings.feature_configured(FEATURE):
+        raise disabled()
+    tasks = [internal_task(q) for q in payload.questions]
+    if len({t.question_id for t in tasks}) != len(tasks):
+        raise HTTPException(422, "Duplicate question id")
+    scoped = settings.for_feature(FEATURE)
+    model = scoped.ai_model
+    limit = asyncio.Semaphore(MAX_PARALLEL_CALLS)
+
+    async def bounded(task: EssayTask) -> dict:
+        async with limit:
+            return await suggest_one(LlmClient(scoped), task, payload.locale, model)
+
+    results = list(await asyncio.gather(*(bounded(task) for task in tasks)))
+    if all("provider_unavailable" in r["flags"] for r in results):
+        raise unavailable()
+    return {"contractVersion": 1, "locale": payload.locale, "questions": results}
 
 
 def attempt_path(payload: EssayReviewRequest) -> str:

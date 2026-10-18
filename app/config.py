@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     # Grading needs more care than summarising (ADR 0003 §5).
     essay_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
     essay_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    # Learning calls POST /api/ai/v1/internal/essay-review at submit time with this bearer
+    # (ADR 0010). Unset keeps that endpoint closed; the teacher endpoint is unaffected.
+    essay_internal_token: Optional[str] = None
 
     # Admin assist: when no school tool matches an owner/admin/teacher question, answer with
     # the tool catalogue instead of a free model draft. Public chat is not affected.
