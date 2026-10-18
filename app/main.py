@@ -44,6 +44,7 @@ from app.student_activity import ActivityConclusionRequest, conclude_activity
 from app.student_assistant import StudentAssistantRequest, answer_student
 from app.student_context import resolve_student_context
 from app.student_discovery import DiscoveryRequest, reflect_student
+from app.teacher_assessment_selection import SelectionRequest, propose_selection
 from app.teacher_essay_review import (
     EssayReviewRequest,
     InternalEssayReviewRequest,
@@ -119,6 +120,7 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
         max_tokens=settings.ai_max_tokens,
         provider_configured=settings.ai_provider_base_url is not None,
         essay_review_enabled=settings.feature_configured("essay"),
+        assessment_selection_enabled=settings.feature_configured("selection"),
         sis_service_url=settings.sis_service_url,
         admission_service_url=settings.admission_service_url,
         payment_service_url=settings.payment_service_url,
@@ -462,6 +464,39 @@ async def teacher_essay_review(
         result = await asyncio.wait_for(review_essays(settings, authorization, payload), 55)
     except TimeoutError as exc:
         raise HTTPException(503, "Essay review unavailable") from exc
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/api/ai/v1/teacher/assessment-selection")
+async def teacher_assessment_selection(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """A proposed question split from the teacher's own bank (ADR 0011); nothing is saved."""
+
+    async def bounded_body() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 4096:
+                raise HTTPException(413, "Assessment selection request too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_body(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Assessment selection request timed out") from exc
+    try:
+        payload = SelectionRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid assessment selection request") from exc
+    try:
+        result = await asyncio.wait_for(propose_selection(settings, authorization, payload), 55)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Assessment selection unavailable") from exc
     return Response(
         json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
     )

@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-FEATURE_PROVIDERS = ("discovery", "assistant", "chat", "essay")
+FEATURE_PROVIDERS = ("discovery", "assistant", "chat", "essay", "selection")
 
 
 class Settings(BaseSettings):
@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # Learning calls POST /api/ai/v1/internal/essay-review at submit time with this bearer
     # (ADR 0010). Unset keeps that endpoint closed; the teacher endpoint is unaffected.
     essay_internal_token: Optional[str] = None
+    # selection: a teacher's AI-proposed question split for an assessment (ADR 0011). The
+    # prompt carries bank counts and short prompt excerpts of the teacher's own questions.
+    # Unset means the feature is off (the Teacher web hides the button).
+    selection_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
+    selection_provider_base_url: Optional[HttpUrl] = None
+    selection_provider_api_key: Optional[str] = None
+    selection_model: Optional[str] = None
+    selection_max_tokens: int = Field(default=800, ge=1, le=2048)
+    selection_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
+    selection_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
 
     # Admin assist: when no school tool matches an owner/admin/teacher question, answer with
     # the tool catalogue instead of a free model draft. Public chat is not affected.
