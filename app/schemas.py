@@ -121,6 +121,8 @@ class MetadataResponse(CamelModel):
     essay_review_enabled: bool = False
     # True when the SELECTION_* provider block is complete (ADR 0011).
     assessment_selection_enabled: bool = False
+    # True when the DRAFTS_* provider block is complete (question drafts from readings).
+    question_drafts_enabled: bool = False
     sis_service_url: str
     admission_service_url: str
     payment_service_url: str

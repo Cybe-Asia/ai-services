@@ -294,3 +294,15 @@ def test_question_shapes_per_type():
     ):
         with pytest.raises(ValueError):
             build(**broken)
+
+
+def test_metadata_says_whether_drafting_is_configured(setup):
+    assert (
+        TestClient(main.app).get("/api/v1/ai-service/metadata").json()["questionDraftsEnabled"]
+        is True
+    )
+    main.app.dependency_overrides[main.get_settings] = lambda: Settings()
+    assert (
+        TestClient(main.app).get("/api/v1/ai-service/metadata").json()["questionDraftsEnabled"]
+        is False
+    )

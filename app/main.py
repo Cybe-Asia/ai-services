@@ -122,6 +122,7 @@ async def metadata(settings: Settings = SETTINGS_DEPENDENCY) -> MetadataResponse
         provider_configured=settings.ai_provider_base_url is not None,
         essay_review_enabled=settings.feature_configured("essay"),
         assessment_selection_enabled=settings.feature_configured("selection"),
+        question_drafts_enabled=settings.feature_configured("drafts"),
         sis_service_url=settings.sis_service_url,
         admission_service_url=settings.admission_service_url,
         payment_service_url=settings.payment_service_url,
