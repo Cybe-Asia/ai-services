@@ -51,6 +51,7 @@ from app.teacher_essay_review import (
     review_essays,
     review_internal,
 )
+from app.teacher_question_drafts import DraftRequest, draft_questions
 from app.thread_store import ThreadNotFound, ThreadStore
 
 app = FastAPI(
@@ -497,6 +498,42 @@ async def teacher_assessment_selection(
         result = await asyncio.wait_for(propose_selection(settings, authorization, payload), 55)
     except TimeoutError as exc:
         raise HTTPException(503, "Assessment selection unavailable") from exc
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/api/ai/v1/teacher/question-drafts")
+async def teacher_question_drafts(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """Questions drafted from a module's chapter readings for the teacher to review.
+
+    Nothing is saved: the teacher saves accepted drafts to their bank as drafts.
+    """
+
+    async def bounded_body() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 8192:
+                raise HTTPException(413, "Question drafting request too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_body(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Question drafting request timed out") from exc
+    try:
+        payload = DraftRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid question drafting request") from exc
+    try:
+        result = await asyncio.wait_for(draft_questions(settings, authorization, payload), 55)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Question drafting unavailable") from exc
     return Response(
         json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
     )

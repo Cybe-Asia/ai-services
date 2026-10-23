@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-FEATURE_PROVIDERS = ("discovery", "assistant", "chat", "essay", "selection")
+FEATURE_PROVIDERS = ("discovery", "assistant", "chat", "essay", "selection", "drafts")
 
 
 class Settings(BaseSettings):
@@ -85,6 +85,17 @@ class Settings(BaseSettings):
     selection_max_tokens: int = Field(default=800, ge=1, le=2048)
     selection_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     selection_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    # drafts: questions an AI drafts for a teacher from a module's chapter readings (ADR 0011
+    # §9 follow-up). The prompt carries the chosen lessons' text and the teacher's settings;
+    # ten bilingual questions with options and explanations need a larger answer.
+    # Unset means the feature is off (the Teacher web hides the button).
+    drafts_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
+    drafts_provider_base_url: Optional[HttpUrl] = None
+    drafts_provider_api_key: Optional[str] = None
+    drafts_model: Optional[str] = None
+    drafts_max_tokens: int = Field(default=8000, ge=1, le=16000)
+    drafts_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
+    drafts_timeout_seconds: float = Field(default=45.0, ge=1.0, le=120.0)
 
     # Admin assist: when no school tool matches an owner/admin/teacher question, answer with
     # the tool catalogue instead of a free model draft. Public chat is not affected.
