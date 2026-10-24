@@ -24,7 +24,7 @@
     "app/teacher_essay_review.py": "c9463cefa7c1659ab8cbbd663d2a2ce8659b0f71279fffd92fd2c2a0fd8bf04c",
     "app/teacher_question_drafts.py": "01f643486d5e18014e710fd53077f1d3d92086766873c49f4977a4e2654cbf2f",
     "app/thread_store.py": "5d9542616b11087877248991ea5ecfc1fdc50a951316c47d11c27ec577ca70dd",
-    "requirements.txt": "a7f041727d26ba41187862fda5e09af791d3ef14f2a2577aaad2fe467608e8ce"
+    "requirements.txt": "0bae8305d4d72e890f0f3eaa57bafbc5c525e4577261912cb719365aaf88f64c"
   },
   "scope": "approved current web integration; school-staging; no automatic GitOps or production promotion"
 }
