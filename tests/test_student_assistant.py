@@ -207,7 +207,32 @@ def test_schedule_uses_owner_epoch_milliseconds_and_jakarta_timezone(api, monkey
         headers={"Authorization": "Bearer valid-student"},
     )
     assert response.status_code == 200
-    assert "2099-01-01 07:00–2099-01-01 08:00 WIB" in response.json()["reply"]["text"]
+    assert response.json()["reply"]["text"] == "**Thursday, 1 Jan**\n07:00–08:00 · Math"
+
+
+def test_schedule_answers_the_asked_day_grouped_with_school_subject_names():
+    from app.student_assistant import schedule_text
+
+    now = datetime(2026, 10, 26, 6, 0, tzinfo=student_assistant.JAKARTA)  # Monday
+
+    def at(day: int, hour: int, minute: int = 0) -> int:
+        moment = datetime(2026, 10, day, hour, minute, tzinfo=student_assistant.JAKARTA)
+        return int(moment.timestamp() * 1000)
+
+    meetings = [
+        (at(26, 7, 30), at(26, 8, 15), "Mathematics · Year 7A"),
+        (at(26, 8, 15), at(26, 9), "Science · Year 7A"),
+        (at(27, 7, 30), at(27, 8, 15), "English · Year 7A"),
+    ]
+    assert schedule_text(meetings, "Apa jadwal pelajaranku hari Senin?", "id", now) == (
+        "**Senin, 26 Okt**\n07.30–08.15 · Matematika\n08.15–09.00 · IPA"
+    )
+    tomorrow = schedule_text(meetings, "What is on tomorrow?", "en", now)
+    assert tomorrow == "**Tuesday, 27 Oct**\n07:30–08:15 · English"
+    saturday = schedule_text(meetings, "Jadwal hari Sabtu?", "id", now)
+    assert saturday == "Tidak ada kelas pada Sabtu, 31 Okt."
+    # No day named: the next upcoming meetings, one heading per day.
+    assert schedule_text(meetings, "Jadwalku?", "id", now).count("**") == 4
 
 
 def test_no_selected_source_never_calls_provider(api, monkeypatch):

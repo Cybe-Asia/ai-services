@@ -1,7 +1,7 @@
 """Read-only Kibo tools grounded in currently authorized school publications."""
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
@@ -165,6 +165,111 @@ async def homework(
     )
 
 
+JAKARTA = ZoneInfo("Asia/Jakarta")
+DAY_NAMES = {
+    "id": ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"],
+    "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+}
+MONTH_NAMES = {
+    "id": ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"],
+    "en": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+}
+DAY_WORDS = [
+    ("senin", "monday"),
+    ("selasa", "tuesday"),
+    ("rabu", "wednesday"),
+    ("kamis", "thursday"),
+    ("jumat", "jum'at", "friday"),
+    ("sabtu", "saturday"),
+    ("minggu", "ahad", "sunday"),
+]
+# Timetable titles come from SIS in English ("Mathematics · Year 7A"); Indonesian replies use
+# the school's subject names. Unknown subjects keep the SIS title.
+SUBJECTS_ID = {
+    "mathematics": "Matematika",
+    "math": "Matematika",
+    "science": "IPA",
+    "social studies": "IPS",
+    "humanities": "IPS",
+    "english": "Bahasa Inggris",
+    "indonesian": "Bahasa Indonesia",
+    "indonesian language": "Bahasa Indonesia",
+    "computing": "Informatika",
+    "ict": "Informatika",
+    "civics": "Pendidikan Pancasila",
+    "pancasila education": "Pendidikan Pancasila",
+    "religion": "Pendidikan Agama",
+    "islamic studies": "Pendidikan Agama Islam",
+    "physical education": "PJOK",
+    "art": "Seni Budaya",
+    "arts": "Seni Budaya",
+    "quran": "Al-Qur'an",
+}
+CLASS_SUFFIX = re.compile(r"\s+[·\-–]\s+(?:year|kelas|grade)\s*\d+\w*\s*$", re.IGNORECASE)
+
+
+def asked_day(question: str, today: date) -> Optional[date]:
+    """The day a schedule question names ("hari Senin", "besok", "today"), or None."""
+    text = question.lower()
+    if re.search(r"\b(hari ini|today)\b", text):
+        return today
+    if re.search(r"\b(besok|tomorrow)\b", text):
+        return today + timedelta(days=1)
+    for weekday, words in enumerate(DAY_WORDS):
+        if any(re.search(rf"\b{re.escape(word)}\b", text) for word in words):
+            return today + timedelta(days=(weekday - today.weekday()) % 7)
+    return None
+
+
+def meeting_title(title: str, locale: str) -> str:
+    subject = CLASS_SUFFIX.sub("", title).strip() or title
+    return SUBJECTS_ID.get(subject.lower(), subject) if locale == "id" else subject
+
+
+def day_label(day: date, locale: str) -> str:
+    return f"{DAY_NAMES[locale][day.weekday()]}, {day.day} {MONTH_NAMES[locale][day.month - 1]}"
+
+
+def schedule_text(
+    meetings: list[tuple[int, int, str]], question: str, locale: str, now: datetime
+) -> str:
+    """Class meetings grouped by day: the day the question names, else the next six upcoming."""
+    clock = "%H.%M" if locale == "id" else "%H:%M"
+    rows = [
+        (
+            datetime.fromtimestamp(start / 1000, JAKARTA),
+            datetime.fromtimestamp(end / 1000, JAKARTA),
+            title,
+        )
+        for start, end, title in sorted(meetings)
+    ]
+    day = asked_day(question, now.date())
+    if day is not None:
+        rows = [row for row in rows if row[0].date() == day]
+        if not rows:
+            return (
+                f"Tidak ada kelas pada {day_label(day, locale)}."
+                if locale == "id"
+                else f"No classes on {day_label(day, locale)}."
+            )
+    else:
+        rows = [row for row in rows if row[1] >= now][:6]
+        if not rows:
+            return (
+                "Belum ada jadwal kelas mendatang yang dipublikasikan."
+                if locale == "id"
+                else "No upcoming class meetings have been published."
+            )
+    groups: dict[date, list[str]] = {}
+    for begins, finishes, title in rows:
+        groups.setdefault(begins.date(), []).append(
+            f"{begins.strftime(clock)}–{finishes.strftime(clock)} · {meeting_title(title, locale)}"
+        )
+    return "\n\n".join(
+        f"**{day_label(day, locale)}**\n" + "\n".join(lines) for day, lines in groups.items()
+    )
+
+
 async def schedule(
     settings: Settings, authorization: str, payload: StudentAssistantRequest
 ) -> dict:
@@ -193,23 +298,8 @@ async def schedule(
             or len(title) > 200
         ):
             raise HTTPException(503, "Student timetable unavailable")
-        if end >= datetime.now().timestamp() * 1000:
-            meetings.append((start, end, title))
-    lines = []
-    zone = ZoneInfo("Asia/Jakarta")
-    for start, end, title in sorted(meetings)[:6]:
-        begins = datetime.fromtimestamp(start / 1000, zone).strftime("%Y-%m-%d %H:%M")
-        finishes = datetime.fromtimestamp(end / 1000, zone).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{title} · {begins}–{finishes} WIB")
-    text = (
-        "\n".join(lines)
-        if lines
-        else (
-            "Belum ada jadwal kelas mendatang yang dipublikasikan."
-            if payload.locale == "id"
-            else "No upcoming class meetings have been published."
-        )
-    )
+        meetings.append((start, end, title))
+    text = schedule_text(meetings, payload.question, payload.locale, datetime.now(JAKARTA))
     return reply(
         text,
         "Jadwal kelas dari sekolah" if payload.locale == "id" else "Your school's class timetable",

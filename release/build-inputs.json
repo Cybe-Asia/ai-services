@@ -17,7 +17,7 @@
     "app/schemas.py": "28004ac4a0dd3bc08d26e7b9d5a91590f7a28b7d006e485683e37f7bddf125fa",
     "app/service_tools.py": "42ca859860eb36a6a6ccc5a2a4f83e878ef6ab574902d23ba2be95ab4f38a376",
     "app/student_activity.py": "2b300d594a3b1c68ebe49f3a0f3da1a24d63f69ced57e1bbcc48ac883defa73a",
-    "app/student_assistant.py": "cb8a629608073aaea88bf785a22248c8f0e302bacd118fbdd5df9edb91cf368f",
+    "app/student_assistant.py": "f165479400cf5fdc4f3bf4e81f8b24a7d4e219c6c7bf5c3950bbaf29b70cceb9",
     "app/student_context.py": "d912c1a38e664451eba60c9f78be9a329cd1ede59f3b85c4b39e44f4741bdc87",
     "app/student_discovery.py": "2d97a7858af09be0b2fb03d9f076712bcaafa952a6b5bdb3b2e462c64e693eb0",
     "app/teacher_assessment_selection.py": "71dbedcd0cee854f3216483c433e939ceb7d7fa92c469af6424aceabedbbb03e",
