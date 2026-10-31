@@ -45,6 +45,7 @@ from app.student_assistant import StudentAssistantRequest, answer_student
 from app.student_context import resolve_student_context
 from app.student_discovery import DiscoveryRequest, reflect_student
 from app.teacher_assessment_selection import SelectionRequest, propose_selection
+from app.teacher_chapter_summary import SummaryRequest, summarize_chapter
 from app.teacher_essay_review import (
     EssayReviewRequest,
     InternalEssayReviewRequest,
@@ -499,6 +500,39 @@ async def teacher_assessment_selection(
         result = await asyncio.wait_for(propose_selection(settings, authorization, payload), 55)
     except TimeoutError as exc:
         raise HTTPException(503, "Assessment selection unavailable") from exc
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/api/ai/v1/teacher/chapter-summary")
+async def teacher_chapter_summary(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """A short reading of one chapter's class results (Learning ADR 0023); nothing is saved."""
+
+    async def bounded_body() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 1024:
+                raise HTTPException(413, "Chapter summary request too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_body(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Chapter summary request timed out") from exc
+    try:
+        payload = SummaryRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid chapter summary request") from exc
+    try:
+        result = await asyncio.wait_for(summarize_chapter(settings, authorization, payload), 55)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Chapter summary unavailable") from exc
     return Response(
         json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
     )
