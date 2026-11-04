@@ -269,6 +269,7 @@ CASES = json.loads(r"""[
     ]
    ],
    "standalone": [
+    "rasional",
     "ipa"
    ]
   }
@@ -325,6 +326,14 @@ CASES = json.loads(r"""[
     "integral"
    ]
   }
+ ],
+ [
+  "garis bilangan ada di bab berapa?",
+  "search"
+ ],
+ [
+  "materi pecahan itu di bab apa ya?",
+  "search"
  ]
 ]""")
 

@@ -802,7 +802,8 @@ async def find_lessons(
             for v in (course_title if isinstance(course_title, dict) else {}).values()
             if isinstance(v, str)
         )
-        for chapter in chapters:
+        # Lessons numbers chapters by their order in the module ("Bab 1", "Bab 2", ...).
+        for number, chapter in enumerate(chapters, 1):
             if not isinstance(chapter, dict) or not isinstance(chapter.get("lessons"), list):
                 raise HTTPException(503, "Student courses unavailable")
             heading = chapter.get("title")
@@ -831,7 +832,10 @@ async def find_lessons(
                     found = (lesson.get("id"), translated(title, payload.locale))
                     break
             if found or all(t in chapter_text.casefold() for t in terms):
-                chapter_title = translated(heading, payload.locale)
+                chapter_title = (
+                    f"{'Bab' if payload.locale == 'id' else 'Ch.'} {number} · "
+                    + translated(heading, payload.locale)
+                )
                 lesson_id, lesson_title = found or (None, "–")
                 hits.append(
                     (
@@ -1139,10 +1143,10 @@ async def explain_topic(
         authorization,
         selected,
         # Kibo picked the reading, so never "the reading you chose".
-        f'Kibo menemukan bab "{chapter}" tentang "{query}", tapi bacaan pertamanya belum '
+        f'Kibo menemukan "{chapter}" tentang "{query}", tapi bacaan pertamanya belum '
         "menjawab pertanyaanmu secara langsung. Buka babnya untuk membaca materinya."
         if payload.locale == "id"
-        else f'Kibo found the chapter "{chapter}" about "{query}", but its first reading does '
+        else f'Kibo found "{chapter}" about "{query}", but its first reading does '
         "not answer your question directly. Open the chapter to read the material.",
     )
     result["reply"]["actions"] = hits[:5]

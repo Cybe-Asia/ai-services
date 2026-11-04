@@ -819,9 +819,15 @@ def test_search_finds_the_chapter_and_opens_it_in_lessons(api, monkeypatch):
     monkeypatch.setattr(student_assistant, "learning_data", catalogue_data(paths))
     body = ask(api, "cariin dong materi integral").json()["reply"]
     assert body["text"] == 'Kibo menemukan 1 bab tentang "integral":'
-    assert body["table"]["rows"] == [["Matematika 11", "Integral", "Antiturunan"]]
+    # The chapter carries the number Lessons shows ("which chapter is it in?").
+    assert body["table"]["rows"] == [["Matematika 11", "Bab 2 · Integral", "Antiturunan"]]
     assert body["actions"] == [
-        {"label": "Integral", "course_id": "course-one", "chapter_id": "ch-int", "lesson_id": "l2"}
+        {
+            "label": "Bab 2 · Integral",
+            "course_id": "course-one",
+            "chapter_id": "ch-int",
+            "lesson_id": "l2",
+        }
     ]
     assert all(params == {"class_id": "class-one"} for _, params in paths)
     body = ask(api, "integral tentu materi").json()["reply"]
@@ -942,7 +948,7 @@ def test_concept_question_explains_from_the_matching_reading(api, monkeypatch, m
     assert body["text"] == "Integral adalah kebalikan turunan."
     assert body["source"] == "Antiturunan"
     assert body["actions"][0] == {
-        "label": "Integral",
+        "label": "Bab 2 · Integral",
         "course_id": "course-one",
         "chapter_id": "ch-int",
         "lesson_id": "l2",
@@ -958,7 +964,7 @@ def test_concept_reading_that_does_not_answer_points_to_the_chapter(api, monkeyp
     monkeypatch.setattr(model, "complete", unanswered)
     monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
     body = ask(api, "apa itu integral?").json()["reply"]
-    assert body["text"].startswith('Kibo menemukan bab "Integral" tentang "integral"')
+    assert body["text"].startswith('Kibo menemukan "Bab 2 · Integral" tentang "integral"')
     assert "yang kamu pilih" not in body["text"]
     assert body["actions"][0]["lesson_id"] == "l2"
 
