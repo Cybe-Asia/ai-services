@@ -66,3 +66,22 @@ def test_assistant_data_tier_reaches_the_gateway_header_and_others_send_none():
     assert headers["x-ai-data-tier"] == "standard"
     assert headers["authorization"] == "Bearer school-token"
     assert "x-ai-data-tier" not in _provider_headers(settings)
+
+
+def test_every_feature_block_carries_its_own_data_tier():
+    from app.config import FEATURE_PROVIDERS, Settings
+    from app.llm_client import _provider_headers
+
+    for feature in FEATURE_PROVIDERS:
+        settings = Settings(
+            **{
+                f"{feature}_provider_base_url": "http://ai-gateway.ai-platform:8080/v1",
+                f"{feature}_provider_api_key": "gateway-token",
+                f"{feature}_model": "digital-school-chat",
+                f"{feature}_data_tier": "standard",
+            }
+        )
+        assert _provider_headers(settings.for_feature(feature))["x-ai-data-tier"] == "standard"
+        for other in FEATURE_PROVIDERS:
+            if other != feature:
+                assert "x-ai-data-tier" not in _provider_headers(settings.for_feature(other))

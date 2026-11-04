@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     # The reflection is a short grounded rewrite; reasoning only adds latency and cost.
     discovery_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     discovery_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
+    discovery_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
 
     assistant_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
     assistant_provider_base_url: Optional[HttpUrl] = None
@@ -67,6 +68,7 @@ class Settings(BaseSettings):
     chat_max_tokens: int = Field(default=512, ge=1, le=2048)
     chat_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     chat_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    chat_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
     essay_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
     essay_provider_base_url: Optional[HttpUrl] = None
     essay_provider_api_key: Optional[str] = None
@@ -76,6 +78,7 @@ class Settings(BaseSettings):
     # Grading needs more care than summarising (ADR 0003 §5).
     essay_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
     essay_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    essay_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
     # Learning calls POST /api/ai/v1/internal/essay-review at submit time with this bearer
     # (ADR 0010). Unset keeps that endpoint closed; the teacher endpoint is unaffected.
     essay_internal_token: Optional[str] = None
@@ -89,6 +92,7 @@ class Settings(BaseSettings):
     selection_max_tokens: int = Field(default=800, ge=1, le=2048)
     selection_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     selection_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    selection_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
     # drafts: questions an AI drafts for a teacher from a module's chapter readings (ADR 0011
     # §9 follow-up). The prompt carries the chosen lessons' text and the teacher's settings;
     # ten bilingual questions with options and explanations need a larger answer.
@@ -100,6 +104,7 @@ class Settings(BaseSettings):
     drafts_max_tokens: int = Field(default=8000, ge=1, le=16000)
     drafts_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
     drafts_timeout_seconds: float = Field(default=45.0, ge=1.0, le=120.0)
+    drafts_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
 
     # Admin assist: when no school tool matches an owner/admin/teacher question, answer with
     # the tool catalogue instead of a free model draft. Public chat is not affected.
@@ -161,7 +166,7 @@ class Settings(BaseSettings):
                 "ai_reasoning_effort": getattr(self, f"{feature}_reasoning_effort"),
                 "ai_provider_message_max_chars": None,
                 "request_timeout_seconds": getattr(self, f"{feature}_timeout_seconds"),
-                "ai_data_tier": getattr(self, f"{feature}_data_tier", None),
+                "ai_data_tier": getattr(self, f"{feature}_data_tier"),
             }
         )
 
