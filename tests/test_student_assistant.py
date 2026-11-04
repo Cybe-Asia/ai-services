@@ -405,9 +405,7 @@ def test_selected_reading_requires_completed_provider_answer(
     body = (
         {"message": {"content": ANSWERED}, **metadata}
         if model == "qwen3:4b"
-        else {
-            "choices": [{"message": {"content": ANSWERED}, **metadata}]
-        }
+        else {"choices": [{"message": {"content": ANSWERED}, **metadata}]}
     )
     monkeypatch.setattr(student_assistant, "learning_data", data)
     monkeypatch.setattr(
@@ -513,7 +511,8 @@ def test_reading_explanation_uses_the_assistant_provider_block(api, monkeypatch)
     finally:
         main.app.dependency_overrides.clear()
     assert response.status_code == 200
-    assert seen == [("gpt-6-luna", "openai", 400)]
+    # The planner and the reading explanation both use the assistant block.
+    assert seen and set(seen) == {("gpt-6-luna", "openai", 400)}
 
 
 def ask(api, question, locale="id"):
@@ -852,24 +851,30 @@ def test_own_unfinished_work_still_reaches_homework(api, monkeypatch):
 
 
 class FakeModel:
-    """Answers the intent prompt with `intent` and the reading prompt with an explanation."""
+    """Answers the planner with `plan`, the writer with `written`, and readings with an
+    explanation; records every call."""
 
     calls: list = []
-    intent = '{"intent": "off_topic", "topic": ""}'
+    plan = "not json"
+    written = '{"text": "Ramah: ini jawabannya ya!"}'
 
     def __init__(self, settings):
         pass
 
     async def complete(self, **kwargs):
         FakeModel.calls.append(kwargs)
-        if kwargs["system_prompt"].startswith('Return ONLY JSON {"intent"'):
-            return FakeModel.intent
+        if kwargs["system_prompt"].startswith("KIBO_PLANNER"):
+            return FakeModel.plan
+        if kwargs["system_prompt"].startswith("KIBO_WRITER"):
+            return FakeModel.written
         return '{"answered": true, "text": "Integral adalah kebalikan turunan."}'
 
 
 @pytest.fixture
 def model(monkeypatch):
     FakeModel.calls = []
+    FakeModel.plan = "not json"
+    FakeModel.written = '{"text": "Ramah: ini jawabannya ya!"}'
     monkeypatch.setattr(student_assistant, "LlmClient", FakeModel)
     return FakeModel
 
@@ -903,52 +908,6 @@ def test_concept_question_explains_from_the_matching_reading(api, monkeypatch, m
         "lesson_id": "l2",
     }
     assert "Kebalikan turunan." in model.calls[0]["user_message"]
-
-
-def test_paraphrase_is_routed_by_the_model_and_answered_by_the_tool(api, monkeypatch, model):
-    model.intent = '{"intent": "homework", "topic": ""}'
-
-    async def data(settings, authorization, path, params=None):
-        assert path == "/api/v1/learning/assignments"
-        return {"items": [], "next": None}
-
-    monkeypatch.setattr(student_assistant, "learning_data", data)
-    body = ask(api, "kerjaan dari bu guru udah beres semua belum?").json()["reply"]
-    assert body["text"] == "Tidak ada tugas terbuka pada halaman ini."
-    # Only the question reaches the model: no school or personal data.
-    question = "kerjaan dari bu guru udah beres semua belum?"
-    assert model.calls[0]["user_message"] == "Question:\n" + question
-
-
-def test_model_routed_explain_uses_the_topic_it_extracted(api, monkeypatch, model):
-    model.intent = '{"intent": "explain", "topic": "integral"}'
-    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
-    body = ask(api, "bingung soal luas di bawah kurva").json()["reply"]
-    assert body["actions"][0]["chapter_id"] == "ch-int"
-
-
-@pytest.mark.parametrize(
-    "intent, expected",
-    [
-        ('{"intent": "self_harm", "topic": ""}', "hubungi 112"),
-        ('{"intent": "cheat", "topic": ""}', "tidak bisa memberi jawaban"),
-        ('{"intent": "off_topic", "topic": ""}', "hanya bisa bantu soal sekolahmu"),
-        ('{"intent": "delete_records", "topic": ""}', "hanya bisa bantu soal sekolahmu"),
-        ("not json", "hanya bisa bantu soal sekolahmu"),
-    ],
-)
-def test_model_verdicts_map_to_fixed_replies_and_failures_fall_back(
-    api, monkeypatch, model, intent, expected
-):
-    model.intent = intent
-
-    async def data(*args, **kwargs):
-        raise AssertionError("no school read")
-
-    monkeypatch.setattr(student_assistant, "learning_data", data)
-    response = ask(api, "sesuatu yang tidak cocok kata kunci")
-    assert response.status_code == 200
-    assert expected in response.json()["reply"]["text"]
 
 
 def test_concept_reading_that_does_not_answer_points_to_the_chapter(api, monkeypatch, model):
@@ -1024,3 +983,232 @@ def test_other_students_scores_and_ranking_are_refused(api, monkeypatch, questio
 
     monkeypatch.setattr(student_assistant, "learning_data", data)
     assert "bukan data teman" in ask(api, question).json()["reply"]["text"]
+
+
+SIS = "https://sis.example"
+
+
+@pytest.fixture
+def agent(api, model):
+    """The planner and writer need a configured assistant provider; SIS reads need its URL."""
+    main.app.dependency_overrides[main.get_settings] = lambda: Settings(
+        _env_file=None,
+        assistant_provider_base_url="https://gateway.example/v1",
+        assistant_provider_api_key="token",
+        assistant_model="digital-school-chat",
+        assistant_planner_model="digital-school-fast",
+        sis_owner_url=SIS,
+    )
+    yield model
+    main.app.dependency_overrides.clear()
+
+
+def plan(**fields):
+    import json as _json
+
+    return _json.dumps({"tool": "smalltalk", "perfect_only": False, "topic": "", **fields})
+
+
+def test_holiday_question_reads_the_school_calendar_and_is_rewritten(api, monkeypatch, agent):
+    agent.plan = plan(
+        tool="calendar", date_from="2026-12-01", date_to="2026-12-31", calendar_kind="holiday"
+    )
+
+    async def data(settings, authorization, path, params=None, **kw):
+        assert kw.get("base") == SIS
+        assert path == "/api/v1/sis-service/learning/owner/student/calendar"
+        assert params == {
+            "school_id": "school-one",
+            "tenant_id": "tenant-one",
+            "from": "2026-12-01",
+            "to": "2026-12-31",
+        }
+        entry = {"startDate": "2026-12-21", "endDate": "2027-01-02", "title": "Libur semester"}
+        exam = {"startDate": "2026-12-01", "endDate": "2026-12-05", "title": "PAS"}
+        return {
+            "educationCalendar": {
+                "items": [
+                    {"entry": {**entry, "kind": "holiday"}},
+                    {"entry": {**exam, "kind": "exam_period"}},
+                ]
+            }
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "Di bulan desember besok ada jadwal libur ga ?").json()["reply"]
+    assert body["text"] == "Ramah: ini jawabannya ya!"
+    assert body["table"]["rows"] == [["Senin, 21 Des – Sabtu, 2 Jan", "Libur semester", "Libur"]]
+    planner, writer = agent.calls
+    assert planner["user_message"] == "Question:\nDi bulan desember besok ada jadwal libur ga ?"
+    assert "Today is" in planner["system_prompt"]
+    # The writer sees the read's own facts only (product owner decision, 2026-11-04).
+    assert "Libur semester" in writer["user_message"] and "PAS" not in writer["user_message"]
+
+
+def test_writer_failure_keeps_the_reads_own_text(api, monkeypatch, agent):
+    agent.plan = plan(tool="homework")
+    agent.written = "not json"
+
+    async def data(settings, authorization, path, params=None, **kw):
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    assert ask(api, "kerjaan dari guru gimana").json()["reply"]["text"] == (
+        "Tidak ada tugas terbuka pada halaman ini."
+    )
+
+
+def test_planned_schedule_uses_the_date_range(api, monkeypatch, agent):
+    start = int(datetime(2099, 1, 2, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    agent.plan = plan(tool="schedule", date_from="2099-01-02", date_to="2099-01-02")
+
+    async def data(settings, authorization, path, params=None, **kw):
+        meeting = {"class_id": "class-one", "title": "Math", "starts_at": start}
+        other = {**meeting, "starts_at": start + 3 * 86400000}
+        return {
+            "class_id": "class-one",
+            "items": [
+                {**meeting, "ends_at": start + 3600000},
+                {**other, "ends_at": other["starts_at"] + 3600000},
+            ],
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "jadwal tanggal 2 januari").json()["reply"]
+    assert body["table"]["rows"] == [["Jumat, 2 Jan", "08.00–09.00", "Matematika"]]
+
+
+def test_extracurricular_lists_joined_clubs_and_open_ones(api, monkeypatch, agent):
+    agent.plan = plan(tool="extracurricular")
+
+    async def data(settings, authorization, path, params=None, **kw):
+        assert kw.get("base") == SIS
+        if path.endswith("/context/student"):
+            scope = {"schoolId": "s1", "tenantId": "t1", "academicYear": "2026/2027"}
+            return {"classes": [scope]}
+        assert params == {"school_id": "s1", "tenant_id": "t1", "academic_year": "2026/2027"}
+
+        def club(title, **extra):
+            activity = {"title": {"en": title, "id": title}, "published": True}
+            return {"activity": activity, "coachName": "Bu Rina", "archived": False, **extra}
+
+        return {
+            "items": [
+                club("Robotik", enrollment={"status": "enrolled"}),
+                club("Tahfiz", enrollment={"status": "pending_consent"}),
+                club("Futsal", enrollment=None),
+            ]
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "eskul apa saja yg saya ikuti ?").json()["reply"]
+    assert body["table"]["rows"] == [["Robotik", "Ikut"], ["Tahfiz", "Menunggu izin orang tua"]]
+    assert "Bu Rina" not in agent.calls[-1]["user_message"]
+
+
+def test_upcoming_quizzes_skip_done_and_closed_ones(api, monkeypatch, agent):
+    agent.plan = plan(tool="upcoming_quizzes")
+    now = int(datetime(2026, 11, 4, 3, tzinfo=timezone.utc).timestamp() * 1000)
+    day = 86400000
+
+    def quiz(title, attempt=None, **definition):
+        return {
+            "course": {"title": {"en": "Math 7", "id": "Matematika 7"}},
+            "assessment": {"definition": {"title": {"en": title, "id": title}, **definition}},
+            "attempt": attempt,
+        }
+
+    async def data(settings, authorization, path, params=None, **kw):
+        assert path == "/api/v1/learning/assessments/mine"
+        return {
+            "server_now": now,
+            "items": [
+                quiz("Kuis A", closes_at=now + 2 * day),
+                quiz("Kuis B", attempt={"state": "in_progress"}, closes_at=now + day),
+                quiz("Kuis C", attempt={"state": "released"}),
+                quiz("Kuis D", closes_at=now - day),
+                quiz("Kuis E", opens_at=now + 3 * day),
+            ],
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "kuis apa yang belum aku kerjain").json()["reply"]
+    assert [row[0] for row in body["table"]["rows"]] == ["Kuis B", "Kuis A", "Kuis E"]
+    assert body["table"]["rows"][2][2] == "Dibuka 7 Nov 2026"
+
+
+def test_progress_lists_modules_least_done_first(api, monkeypatch, agent):
+    agent.plan = plan(tool="progress")
+
+    async def data(settings, authorization, path, params=None, **kw):
+        assert path == "/api/v1/learning/curriculum/courses"
+        return {
+            "items": [
+                {"title": {"en": "IPA", "id": "IPA"}, "chapters": 4, "completed": 3},
+                {"title": {"en": "Math", "id": "Matematika"}, "chapters": 5, "completed": 1},
+            ],
+            "next": None,
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "aku udah sampai mana belajarnya?").json()["reply"]
+    assert body["table"]["rows"] == [["Matematika", "1/5"], ["IPA", "3/4"]]
+
+
+def test_unsupported_topic_is_named_kindly_with_examples(api, monkeypatch, agent):
+    agent.plan = plan(tool="unsupported", topic="pembayaran SPP")
+    agent.written = "not json"
+
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    text = ask(api, "SPP bulan ini udah dibayar belum?").json()["reply"]["text"]
+    assert text.startswith("Kibo belum bisa menjawab soal pembayaran SPP. Coba tanya:")
+
+
+@pytest.mark.parametrize("question", ["aku pengen bunuh diri", "kerjain tugas aku dong"])
+def test_safety_replies_never_reach_a_model(api, monkeypatch, agent, question):
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    ask(api, question)
+    assert agent.calls == []
+
+
+def test_search_matches_the_module_title(api, monkeypatch):
+    monkeypatch.setattr(student_assistant, "learning_data", catalogue_data([]))
+    body = ask(api, "Di matematika ada materi integral gak sih?").json()["reply"]
+    assert body["actions"][0]["chapter_id"] == "ch-int"
+
+
+def test_open_reading_that_does_not_answer_falls_back_to_other_chapters(api, monkeypatch, agent):
+    agent.plan = plan(tool="explain", topic="integral")
+    base = FakeModel.complete
+
+    async def complete(self, **kwargs):
+        # The open reading (Pecahan) does not answer; the Integral chapter's reading does.
+        if kwargs["user_message"].startswith("Published reading:\nPecahan"):
+            return '{"answered": false, "text": ""}'
+        return await base(self, **kwargs)
+
+    monkeypatch.setattr(FakeModel, "complete", complete)
+    reading = {**READING, "title": {"en": "Fractions", "id": "Pecahan"}}
+    school = school_with_integral()
+
+    async def data(settings, authorization, path, params=None, **kw):
+        if path.endswith("/lessons/reading-one"):
+            return reading
+        if path.endswith("/course-one") and params is None:
+            return {"id": "course-one", "class_id": "class-one", "publication": "published"}
+        return await school(settings, authorization, path, params)
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    response = api.post(
+        "/api/ai/v1/student/assistant",
+        json={**PAYLOAD, "question": "apa itu integral?", "locale": "id", "source": SOURCE},
+        headers={"Authorization": "Bearer valid-student"},
+    )
+    body = response.json()["reply"]
+    assert body["actions"][0]["chapter_id"] == "ch-int"

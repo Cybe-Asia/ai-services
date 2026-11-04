@@ -15,8 +15,10 @@ async def learning_data(
     path: str,
     params: Optional[dict[str, str]] = None,
     subject: str = "Student",
+    base: Optional[str] = None,
 ) -> dict:
-    """One bounded JSON read from Learning as the caller; `subject` names the role in errors."""
+    """One bounded JSON read from Learning (or `base`, an owner with the same origin rules) as
+    the caller; `subject` names the role in errors."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, f"{subject} session required")
     token = authorization[7:]
@@ -28,7 +30,7 @@ async def learning_data(
         ) as client:
             async with client.stream(
                 "GET",
-                settings.learning_service_url.rstrip("/") + path,
+                (base or settings.learning_service_url).rstrip("/") + path,
                 headers={
                     "Authorization": authorization,
                     "Accept": "application/json",

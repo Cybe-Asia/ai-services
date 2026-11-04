@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     assistant_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     assistant_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
     assistant_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
+    # Kibo's question planner may use a smaller model of the same provider block.
+    assistant_planner_model: Optional[str] = None
 
     chat_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
     chat_provider_base_url: Optional[HttpUrl] = None
@@ -117,6 +119,9 @@ class Settings(BaseSettings):
 
     sis_service_url: str = "http://sis-service"
     learning_service_url: str = "https://learning-api"
+    # SIS reads for Kibo (calendar, extracurriculars) carry the Student's token, so the same
+    # rule as Learning applies: HTTPS, or HTTP on loopback only. Unset turns those tools off.
+    sis_owner_url: Optional[str] = None
     admission_service_url: str = "http://admission-service"
     payment_service_url: str = "http://payment-service"
     request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
@@ -174,9 +179,11 @@ class Settings(BaseSettings):
         """Provider settings for Discovery reflection and the Arena conclusion."""
         return self.for_feature("discovery")
 
-    @field_validator("learning_service_url")
+    @field_validator("learning_service_url", "sis_owner_url")
     @classmethod
-    def learning_owner_origin(cls, value: str) -> str:
+    def learning_owner_origin(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
         url = urlsplit(value)
         host = url.hostname
         loopback = host in {"localhost", "127.0.0.1", "::1"}
