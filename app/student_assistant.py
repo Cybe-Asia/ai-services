@@ -26,12 +26,22 @@ class LessonSource(BaseModel):
     lesson_id: str = Field(pattern=ID_PATTERN)
 
 
+class EarlierTurn(BaseModel):
+    """One earlier question and Kibo's reply text from this Student's own conversation, sent by
+    the client so a follow-up ("kalau Januari?") can be understood. Context only, untrusted."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    question: str = Field(min_length=1, max_length=500)
+    answer: str = Field(max_length=600)
+
+
 class StudentAssistantRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     question: str = Field(min_length=1, max_length=500)
     locale: Literal["en", "id"]
     class_id: str = Field(pattern=ID_PATTERN)
     source: Optional[LessonSource] = None
+    history: list[EarlierTurn] = Field(default_factory=list, max_length=3)
 
 
 class ReadingAnswer(BaseModel):

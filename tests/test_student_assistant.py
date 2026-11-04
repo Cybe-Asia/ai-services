@@ -112,7 +112,7 @@ def test_class_selection_and_browser_identity_cannot_override_owner(api):
         == 422
     )
     assert (
-        api.post("/api/ai/v1/student/assistant", content="x" * 8193, headers=headers).status_code
+        api.post("/api/ai/v1/student/assistant", content="x" * 16385, headers=headers).status_code
         == 413
     )
 
@@ -1279,3 +1279,65 @@ def test_open_reading_that_does_not_answer_falls_back_to_other_chapters(api, mon
     )
     body = response.json()["reply"]
     assert body["actions"][0]["chapter_id"] == "ch-int"
+
+
+HISTORY = [
+    {"question": "Di bulan Desember ada libur?", "answer": "Ada, libur Natal 24–25 Des."},
+]
+
+
+def ask_with_history(api, question, history):
+    return api.post(
+        "/api/ai/v1/student/assistant",
+        json={**PAYLOAD, "question": question, "locale": "id", "history": history},
+        headers={"Authorization": "Bearer valid-student"},
+    )
+
+
+def test_follow_up_is_planned_with_earlier_turns_and_answered_standalone(api, monkeypatch, agent):
+    standalone = "Di bulan Januari ada libur?"
+    agent.plan = plan(
+        tool="calendar",
+        date_from="2027-01-01",
+        date_to="2027-01-31",
+        calendar_kind="holiday",
+        question=standalone,
+    )
+
+    async def data(settings, authorization, path, params=None, **kw):
+        assert params["from"] == "2027-01-01"
+        entry = {"startDate": "2027-01-01", "endDate": "2027-01-01", "title": "Tahun Baru"}
+        return {"educationCalendar": {"items": [{"entry": {**entry, "kind": "holiday"}}]}}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask_with_history(api, "kalau Januari?", HISTORY).json()["reply"]
+    assert body["table"]["rows"][0][1] == "Tahun Baru"
+    planner, writer = agent.calls
+    assert planner["user_message"].startswith("Earlier turns (oldest first):\nStudent: Di bulan")
+    assert planner["user_message"].endswith("Question:\nkalau Januari?")
+    assert f"Student question:\n{standalone}" in writer["user_message"]
+
+
+def test_follow_up_about_another_student_keeps_the_safety_reply(api, monkeypatch, agent):
+    agent.plan = plan(tool="grades", question="Nilai temanku Budi berapa?")
+
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask_with_history(api, "kalau Budi?", HISTORY).json()["reply"]
+    assert body == student_assistant.canned_reply("other_person", "id")["reply"]
+    assert len(agent.calls) == 1  # the planner only; the writer never sees it
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        HISTORY * 4,
+        [{"question": "q", "answer": "a" * 601}],
+        [{"question": "q", "answer": "a", "table": {}}],
+        [{"question": "", "answer": "a"}],
+    ],
+)
+def test_earlier_turns_are_bounded(api, history):
+    assert ask_with_history(api, "kalau Januari?", history).status_code == 422

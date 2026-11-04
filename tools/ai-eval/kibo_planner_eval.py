@@ -7,11 +7,12 @@ import json
 from datetime import datetime, timedelta
 
 from app.config import Settings
-from app.kibo_agent import Plan, planner_prompt
+from app.kibo_agent import Plan, earlier, planner_prompt
 from app.llm_client import LlmClient
-from app.student_assistant import JAKARTA
+from app.student_assistant import JAKARTA, StudentAssistantRequest
 
-# [question, expected tool, optional checks: calendar_kind, perfect_only, date_from (+days)]
+# [question, expected tool, optional checks: calendar_kind, perfect_only, date_from (+days),
+#  month, history ([[question, answer], ...]) with standalone (words the rewrite must contain)]
 CASES = json.loads(r"""[
  [
   "ada pr gak",
@@ -240,6 +241,90 @@ CASES = json.loads(r"""[
   {
    "calendar_kind": "holiday"
   }
+ ],
+ [
+  "kalau Januari?",
+  "calendar",
+  {
+   "history": [
+    [
+     "Di bulan Desember ada libur?",
+     "Ada, libur Natal 24–25 Des."
+    ]
+   ],
+   "month": 1,
+   "standalone": [
+    "januari"
+   ]
+  }
+ ],
+ [
+  "kalau yang IPA?",
+  "search",
+  {
+   "history": [
+    [
+     "cariin materi bilangan rasional",
+     "Kibo menemukan 2 bab Matematika tentang bilangan rasional."
+    ]
+   ],
+   "standalone": [
+    "ipa"
+   ]
+  }
+ ],
+ [
+  "terus yang belum aku kerjain apa aja?",
+  "homework",
+  {
+   "history": [
+    [
+     "ada PR gak?",
+     "Ada 1 tugas: proyek IPA sensor kekeruhan air."
+    ]
+   ]
+  }
+ ],
+ [
+  "lusa gimana?",
+  "schedule",
+  {
+   "history": [
+    [
+     "jadwal besok apa aja?",
+     "Besok ada 4 pelajaran, mulai Bahasa Indonesia 07.30."
+    ]
+   ],
+   "date_from": 2
+  }
+ ],
+ [
+  "yang nilainya 100 ada?",
+  "grades",
+  {
+   "history": [
+    [
+     "nilai ujian matematika aku gimana?",
+     "Ini 19 hasil ujian dan kuismu yang sudah dirilis."
+    ]
+   ],
+   "perfect_only": true
+  }
+ ],
+ [
+  "jelasin dong yang itu",
+  "explain",
+  {
+   "history": [
+    [
+     "cariin materi integral",
+     "Kibo menemukan bab Integral di Matematika."
+    ]
+   ],
+   "standalone": [
+    "integral"
+   ]
+  }
  ]
 ]""")
 
@@ -254,10 +339,14 @@ async def main() -> None:
     for case in CASES:
         question, want = case[0], case[1]
         checks = case[2] if len(case) > 2 else {}
+        history = [{"question": q, "answer": a} for q, a in checks.get("history", [])]
+        payload = StudentAssistantRequest(
+            question=question, locale="id", class_id="eval", history=history
+        )
         try:
             answer = await LlmClient(scoped).complete(
                 system_prompt=planner_prompt(today, False),
-                user_message=f"Question:\n{question}",
+                user_message=earlier(payload) + f"Question:\n{question}",
                 response_format={"type": "json_object"},
                 require_complete=True,
                 feature="assistant",
@@ -276,6 +365,8 @@ async def main() -> None:
         if good and "month" in checks:
             month = f"{checks['month']:02d}"
             good = (plan.date_from or "")[5:7] == month and (plan.date_to or "")[5:7] == month
+        if good and "standalone" in checks:
+            good = all(w in plan.question.casefold() for w in checks["standalone"])
         if not good:
             misses.append(f"{question} -> {plan.model_dump_json()}")
     print(f"planner {len(CASES) - len(misses)}/{len(CASES)}")

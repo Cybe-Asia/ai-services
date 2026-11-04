@@ -426,7 +426,8 @@ async def student_assistant(
 ) -> Response:
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > 8192:
+        # The question plus up to three earlier turns (≤500 + 600 characters each).
+        if len(body) + len(chunk) > 16384:
             raise HTTPException(413, "Student question too large")
         body.extend(chunk)
     try:
