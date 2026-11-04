@@ -1,5 +1,6 @@
 """Read-only Kibo tools grounded in currently authorized school publications."""
 
+import asyncio
 import re
 from datetime import date, datetime, timedelta
 from typing import Literal, Optional
@@ -464,11 +465,12 @@ async def games(settings: Settings, authorization: str, payload: StudentAssistan
             ["lessons"],
         )
     done.sort(reverse=True)
-    titles = {}
     # shortcut: one read per module, at most 8 modules; enough for a school year's subjects.
-    for _, course, _, _ in done:
-        if course not in titles and len(titles) < 8:
-            titles[course] = await course_titles(settings, authorization, course, payload.locale)
+    wanted = list(dict.fromkeys(course for _, course, _, _ in done))[:8]
+    found = await asyncio.gather(
+        *(course_titles(settings, authorization, c, payload.locale) for c in wanted)
+    )
+    titles = dict(zip(wanted, found))
     other = "Modul lain" if id_ else "Other module"
     rows = []
     for at, course, lesson, _ in done[:20]:
@@ -567,6 +569,8 @@ async def improvements(
                         and isinstance(pct, (int, float))
                     ):
                         weak.setdefault(objective_id, (float(pct), short(label, 60), level))
+    if not weak and not assessed:
+        return await lowest_results(settings, authorization, payload)
     if not weak:
         return reply(
             (
@@ -715,16 +719,21 @@ async def find_lessons(
         raise HTTPException(503, "Student courses unavailable")
     hits = []
     # shortcut: first catalogue page, at most 15 modules read; enough for one class's subjects.
-    for item in items[:15]:
-        course_id = item.get("id") if isinstance(item, dict) else None
-        if not isinstance(course_id, str) or not re.match(ID_PATTERN, course_id):
-            raise HTTPException(503, "Student courses unavailable")
-        course = await learning_data(
-            settings,
-            authorization,
-            f"/api/v1/learning/curriculum/courses/{course_id}",
-            {"class_id": payload.class_id},
+    ids = [item.get("id") if isinstance(item, dict) else None for item in items[:15]]
+    if not all(isinstance(i, str) and re.match(ID_PATTERN, i) for i in ids):
+        raise HTTPException(503, "Student courses unavailable")
+    courses = await asyncio.gather(
+        *(
+            learning_data(
+                settings,
+                authorization,
+                f"/api/v1/learning/curriculum/courses/{course_id}",
+                {"class_id": payload.class_id},
+            )
+            for course_id in ids
         )
+    )
+    for course_id, course in zip(ids, courses):
         chapters = course.get("chapters")
         if course.get("id") != course_id or not isinstance(chapters, list) or len(chapters) > 50:
             raise HTTPException(503, "Student courses unavailable")
@@ -778,14 +787,11 @@ async def find_lessons(
 PERFECT_WORDS = r"(\b100\b|sempurna|perfect|full mark)"
 
 
-async def grades(
-    settings: Settings,
-    authorization: str,
-    payload: StudentAssistantRequest,
-    perfect_only: Optional[bool] = None,
-) -> dict:
-    """The Student's own quiz and test results that their teacher has released. Learning sends
-    a result only once it is visible to the Student, so nothing unreleased can show here."""
+async def released_results(
+    settings: Settings, authorization: str, payload: StudentAssistantRequest
+) -> list[tuple[int, float, str, str]]:
+    """(submitted_at, score_pct, title, module) of the Student's own results their teacher has
+    released. Learning sends a result only once it is visible to the Student."""
     data = await learning_data(
         settings, authorization, "/api/v1/learning/assessments/mine", {"class_id": payload.class_id}
     )
@@ -809,6 +815,63 @@ async def grades(
         results.append(
             (at if type(at) is int else 0, float(pct), short(title, 120), short(module, 80))
         )
+    return results
+
+
+LOW_SCORE = (
+    75  # shortcut: one pass mark for every subject; use the school's KKM once Kibo reads it.
+)
+
+
+async def lowest_results(
+    settings: Settings, authorization: str, payload: StudentAssistantRequest
+) -> dict:
+    """What to improve when mastery has no evidence yet: the lowest released scores."""
+    id_ = payload.locale == "id"
+    source = "Hasil yang sudah dirilis gurumu" if id_ else "Results your teachers released"
+    results = await released_results(settings, authorization, payload)
+    if not results:
+        return reply(
+            "Belum cukup hasil kuis atau ujian yang dinilai untuk melihat bagian yang perlu "
+            "ditingkatkan. Kerjakan kuis bab dulu, nanti Kibo bisa bantu."
+            if id_
+            else "There aren't enough marked quizzes or tests yet to see what to improve. "
+            "Finish a chapter quiz first.",
+            source,
+            ["lessons"],
+        )
+    low = sorted((r for r in results if r[1] < LOW_SCORE), key=lambda r: r[1])[:5]
+    if not low:
+        return reply(
+            f"Semua nilai kuis dan ujianmu yang sudah dirilis {LOW_SCORE} ke atas. Pertahankan!"
+            if id_
+            else f"All your released quiz and test scores are {LOW_SCORE} or higher. Keep it up!",
+            source,
+            ["lessons"],
+        )
+    return reply(
+        f"Ini {len(low)} kuis/ujian dengan nilai terendahmu; bab-bab ini bagus untuk diulang:"
+        if id_
+        else f"These {len(low)} quizzes/tests have your lowest scores; worth revisiting:",
+        source,
+        ["lessons"],
+        {
+            "columns": ["Ujian/kuis", "Modul", "Nilai"]
+            if id_
+            else ["Quiz/test", "Module", "Score"],
+            "rows": [[title, module, f"{pct:g}"] for _, pct, title, module in low],
+        },
+    )
+
+
+async def grades(
+    settings: Settings,
+    authorization: str,
+    payload: StudentAssistantRequest,
+    perfect_only: Optional[bool] = None,
+) -> dict:
+    """The Student's own released quiz and test results."""
+    results = await released_results(settings, authorization, payload)
     id_ = payload.locale == "id"
     source = "Hasil yang sudah dirilis gurumu" if id_ else "Results your teachers released"
     if not results:

@@ -709,7 +709,6 @@ def test_improve_lists_weakest_current_objectives_with_suggested_lessons(api, mo
 @pytest.mark.parametrize(
     "cells, expected",
     [
-        ([], "Belum cukup hasil kuis"),
         (
             [{"objective_id": "o1", "level": "proficient", "average_pct": 80, "evidence": 3}],
             "sudah di level cakap",
@@ -724,6 +723,41 @@ def test_improve_without_weak_objectives_is_truthful(api, monkeypatch, cells, ex
     body = ask(api, "bagian mana yang kurang?").json()["reply"]
     assert expected in body["text"]
     assert "table" not in body
+
+
+def result_item(title, pct):
+    return {
+        "course": {"title": {"en": "Maths 7", "id": "Matematika 7"}},
+        "assessment": {"definition": {"title": {"en": title, "id": title}}},
+        "attempt": {"submitted_at": 1, "result": {"score_pct": pct}},
+    }
+
+
+@pytest.mark.parametrize(
+    "scores, expected, rows",
+    [
+        ([], "Belum cukup hasil kuis", None),
+        ([90, 100], "75 ke atas", None),
+        (
+            [90, 40, 60],
+            "nilai terendahmu",
+            [["Kuis 40", "Matematika 7", "40"], ["Kuis 60", "Matematika 7", "60"]],
+        ),
+    ],
+)
+def test_improve_without_mastery_evidence_uses_lowest_released_scores(
+    api, monkeypatch, scores, expected, rows
+):
+    async def data(settings, authorization, path, params=None, **kwargs):
+        if path.endswith("/students/me/pathway"):
+            return pathway([])
+        assert path == "/api/v1/learning/assessments/mine"
+        return {"items": [result_item(f"Kuis {n}", n) for n in scores]}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "bagian mana yang kurang?").json()["reply"]
+    assert expected in body["text"]
+    assert (body.get("table") or {}).get("rows") == rows
 
 
 def test_improve_rejects_another_students_pathway(api, monkeypatch):
