@@ -143,7 +143,11 @@ def test_homework_uses_current_own_published_work_and_truthful_page_limits(api, 
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
     assert body["contractVersion"] == 1
-    assert "Read the published chapter" in body["reply"]["text"]
+    assert body["reply"]["table"] == {
+        "columns": ["Assignment", "Points", "Status"],
+        "rows": [["Read the published chapter.", "–", "Not started"]],
+    }
+    assert "1 assignment(s) not submitted" in body["reply"]["text"]
     assert "further records" in body["reply"]["text"]
     assert body["reply"]["destinations"] == ["assigned-work"]
 
@@ -207,7 +211,7 @@ def test_schedule_uses_owner_epoch_milliseconds_and_jakarta_timezone(api, monkey
         headers={"Authorization": "Bearer valid-student"},
     )
     assert response.status_code == 200
-    assert response.json()["reply"]["text"] == "**Thursday, 1 Jan**\n07:00–08:00 · Math"
+    assert response.json()["reply"]["table"]["rows"] == [["Thursday, 1 Jan", "07:00–08:00", "Math"]]
 
 
 def test_schedule_answers_the_asked_day_grouped_with_school_subject_names():
@@ -224,23 +228,35 @@ def test_schedule_answers_the_asked_day_grouped_with_school_subject_names():
         (at(26, 8, 15), at(26, 9), "Science · Year 7A"),
         (at(27, 7, 30), at(27, 8, 15), "English · Year 7A"),
     ]
-    assert schedule_text(meetings, "Apa jadwal pelajaranku hari Senin?", "id", now) == (
-        "**Senin, 26 Okt**\n07.30–08.15 · Matematika\n08.15–09.00 · IPA"
-    )
-    tomorrow = schedule_text(meetings, "What is on tomorrow?", "en", now)
-    assert tomorrow == "**Tuesday, 27 Oct**\n07:30–08:15 · English"
+    text, table = schedule_text(meetings, "Apa jadwal pelajaranku hari Senin?", "id", now)
+    assert text == "Jadwalmu Senin, 26 Okt:"
+    assert table == {
+        "columns": ["Hari", "Jam", "Mapel"],
+        "rows": [
+            ["Senin, 26 Okt", "07.30–08.15", "Matematika"],
+            ["Senin, 26 Okt", "08.15–09.00", "IPA"],
+        ],
+    }
+    _, tomorrow = schedule_text(meetings, "What is on tomorrow?", "en", now)
+    assert tomorrow["rows"] == [["Tuesday, 27 Oct", "07:30–08:15", "English"]]
     saturday = schedule_text(meetings, "Jadwal hari Sabtu?", "id", now)
-    assert saturday == "Tidak ada kelas pada Sabtu, 31 Okt."
-    # No day named: the next upcoming meetings, one heading per day.
-    assert schedule_text(meetings, "Jadwalku?", "id", now).count("**") == 4
+    assert saturday == ("Tidak ada kelas pada Sabtu, 31 Okt.", None)
+    # No day named: the next upcoming meetings across days.
+    assert len(schedule_text(meetings, "Jadwalku?", "id", now)[1]["rows"]) == 3
 
 
-def test_no_selected_source_never_calls_provider(api, monkeypatch):
+def test_no_matching_reading_never_calls_provider(api, monkeypatch):
     class NoModel:
         def __init__(self, settings):
-            raise AssertionError("No published source selected")
+            raise AssertionError("No published source matched")
+
+    async def data(settings, authorization, path, params=None):
+        if path == "/api/v1/learning/curriculum/courses":
+            return {"items": [], "next": None}
+        raise AssertionError(path)
 
     monkeypatch.setattr(student_assistant, "LlmClient", NoModel)
+    monkeypatch.setattr(student_assistant, "learning_data", data)
     response = api.post(
         "/api/ai/v1/student/assistant",
         json={**PAYLOAD, "question": "Explain fractions"},
@@ -498,3 +514,438 @@ def test_reading_explanation_uses_the_assistant_provider_block(api, monkeypatch)
         main.app.dependency_overrides.clear()
     assert response.status_code == 200
     assert seen == [("gpt-6-luna", "openai", 400)]
+
+
+def ask(api, question, locale="id"):
+    return api.post(
+        "/api/ai/v1/student/assistant",
+        json={**PAYLOAD, "question": question, "locale": locale},
+        headers={"Authorization": "Bearer valid-student"},
+    )
+
+
+def test_homework_lists_unsubmitted_work_with_draft_state(api, monkeypatch):
+    async def data(settings, authorization, path, params=None):
+        item = {"class_id": "class-one", "publication": "published", "points": 20}
+        return {
+            "items": [
+                {**item, "prompt_id": "Laporan praktikum", "attempts": []},
+                {
+                    **item,
+                    "prompt_id": "Esai pecahan",
+                    "attempts": [{"student_id": "student-one", "state": "draft"}],
+                },
+                {
+                    **item,
+                    "prompt_id": "Sudah dikirim",
+                    "attempts": [{"student_id": "student-one", "state": "submitted"}],
+                },
+            ],
+            "next": None,
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "ada assignment yang belum saya kerjakan?").json()["reply"]
+    assert body["text"] == "Ada 2 tugas yang belum kamu kirim:"
+    assert body["table"]["rows"] == [
+        ["Laporan praktikum", "20", "Belum dikerjakan"],
+        ["Esai pecahan", "20", "Draf, belum dikirim"],
+    ]
+
+
+def test_games_lists_completed_games_with_module_and_chapter_titles(api, monkeypatch):
+    at = int(datetime(2026, 11, 3, 3, tzinfo=timezone.utc).timestamp() * 1000)
+    award = {"assessment_id": "m", "session_id": "s", "challenge_id": "m", "at": at}
+    paths = []
+
+    async def data(settings, authorization, path, params=None):
+        paths.append(path)
+        if path == "/api/v1/learning/game-progress":
+            return {
+                "awards": {
+                    "practice:course-one|lesson-a|m": {
+                        **award,
+                        "course_id": "course-one",
+                        "lesson_id": "lesson-a",
+                        "checkpoint_id": None,
+                        "xp": 30,
+                    },
+                    "checkpoint:course-one|q": {
+                        **award,
+                        "course_id": "course-one",
+                        "lesson_id": "lesson-a",
+                        "checkpoint_id": "q",
+                        "xp": 0,
+                    },
+                    "practice:old-course|lesson-x|m": {
+                        **award,
+                        "course_id": "old-course",
+                        "lesson_id": "lesson-x",
+                        "checkpoint_id": None,
+                        "xp": 30,
+                        "at": at - 86400000,
+                    },
+                }
+            }
+        if path.endswith("/old-course"):
+            raise HTTPException(403, "denied")
+        return {
+            "id": "course-one",
+            "title": {"en": "Mathematics 7", "id": "Matematika 7"},
+            "chapters": [
+                {
+                    "id": "ch1",
+                    "title": {"en": "Fractions", "id": "Pecahan"},
+                    "lessons": [{"id": "lesson-a"}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "saya sudah menyelesaikan games apa saja?").json()["reply"]
+    assert body["text"] == "Kamu sudah menyelesaikan 2 game (total 60 XP):"
+    assert body["table"] == {
+        "columns": ["Modul", "Bab", "Selesai"],
+        "rows": [
+            ["Matematika 7", "Pecahan", "3 Nov 2026"],
+            ["Modul lain", "–", "2 Nov 2026"],
+        ],
+    }
+    assert sum(p.endswith("/course-one") for p in paths) == 1
+
+
+def test_games_without_completions_says_so(api, monkeypatch):
+    async def data(*args, **kwargs):
+        return {"awards": {}}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "Which games have I finished?", "en").json()["reply"]
+    assert "haven't finished any games" in body["text"]
+    assert "table" not in body
+
+
+def pathway(cells, student="student-one"):
+    return {
+        "student_id": student,
+        "years": [
+            {
+                "timing": "current",
+                "subjects": [
+                    {
+                        "subject": "mathematics",
+                        "subject_name": {"en": "Mathematics", "id": "Matematika"},
+                        "units": [{"objectives": cells}],
+                    }
+                ],
+            },
+            {
+                "timing": "past",
+                "subjects": [
+                    {
+                        "units": [
+                            {
+                                "objectives": [
+                                    {
+                                        "objective_id": "old",
+                                        "level": "beginning",
+                                        "average_pct": 1,
+                                        "evidence": 3,
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+            },
+        ],
+        "objectives": [
+            {"id": "o1", "code": "7.N.1", "text": {"en": "Add", "id": "Menjumlah pecahan"}},
+            {"id": "o2", "code": "7.N.2", "text": {"en": "Ratios", "id": "Rasio"}},
+        ],
+        "suggestions": [
+            {
+                "objective_id": "o1",
+                "course_id": "course-one",
+                "chapter_id": "ch1",
+                "lesson_id": "lesson-a",
+                "lesson_title": {"en": "Like fractions", "id": "Pecahan senama"},
+            }
+        ],
+    }
+
+
+def test_improve_lists_weakest_current_objectives_with_suggested_lessons(api, monkeypatch):
+    async def data(settings, authorization, path, params=None):
+        assert path == "/api/v1/learning/students/me/pathway"
+        return pathway(
+            [
+                {"objective_id": "o2", "level": "developing", "average_pct": 62.4, "evidence": 4},
+                {"objective_id": "o1", "level": "beginning", "average_pct": 40, "evidence": 5},
+                {"objective_id": "o3", "level": "advanced", "average_pct": 95, "evidence": 5},
+                {
+                    "objective_id": "o4",
+                    "level": "not_enough_evidence",
+                    "average_pct": None,
+                    "evidence": 0,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "selama belajar ini saya harus improve apa di bagian mana?").json()["reply"]
+    assert body["table"]["rows"] == [
+        ["Matematika", "Menjumlah pecahan", "40% · Perlu bimbingan", "Pecahan senama"],
+        ["Matematika", "Rasio", "62% · Berkembang", "–"],
+    ]
+    assert body["actions"] == [
+        {
+            "label": "Pecahan senama",
+            "course_id": "course-one",
+            "chapter_id": "ch1",
+            "lesson_id": "lesson-a",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "cells, expected",
+    [
+        ([], "Belum cukup hasil kuis"),
+        (
+            [{"objective_id": "o1", "level": "proficient", "average_pct": 80, "evidence": 3}],
+            "sudah di level cakap",
+        ),
+    ],
+)
+def test_improve_without_weak_objectives_is_truthful(api, monkeypatch, cells, expected):
+    async def data(*args, **kwargs):
+        return pathway(cells)
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "bagian mana yang kurang?").json()["reply"]
+    assert expected in body["text"]
+    assert "table" not in body
+
+
+def test_improve_rejects_another_students_pathway(api, monkeypatch):
+    async def data(*args, **kwargs):
+        return pathway([], student="peer")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    assert ask(api, "apa yang harus aku tingkatkan?").status_code == 503
+
+
+def test_unknown_question_lists_what_kibo_can_answer(api, monkeypatch):
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read for an unknown question")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "halo kibo").json()["reply"]
+    assert "Game apa saja" in body["text"] and "improve" in body["text"]
+
+
+CATALOGUE_COURSE = {
+    "id": "course-one",
+    "title": {"en": "Mathematics 11", "id": "Matematika 11"},
+    "chapters": [
+        {
+            "id": "ch-limit",
+            "title": {"en": "Limits", "id": "Limit"},
+            "lessons": [{"id": "l1", "title": {"en": "Limit of a function", "id": "Limit fungsi"}}],
+        },
+        {
+            "id": "ch-int",
+            "title": {"en": "Integrals", "id": "Integral"},
+            "lessons": [
+                {"id": "l2", "title": {"en": "Antiderivatives", "id": "Antiturunan"}},
+                {"id": "l3", "title": {"en": "Definite integral", "id": "Integral tentu"}},
+            ],
+        },
+    ],
+}
+
+
+def catalogue_data(paths):
+    async def data(settings, authorization, path, params=None):
+        paths.append((path, params))
+        if path == "/api/v1/learning/curriculum/courses":
+            return {"items": [{"id": "course-one"}], "next": None}
+        return CATALOGUE_COURSE
+
+    return data
+
+
+def test_search_finds_the_chapter_and_opens_it_in_lessons(api, monkeypatch):
+    paths = []
+    monkeypatch.setattr(student_assistant, "learning_data", catalogue_data(paths))
+    body = ask(api, "cariin dong materi integral").json()["reply"]
+    assert body["text"] == 'Kibo menemukan 1 bab tentang "integral":'
+    assert body["table"]["rows"] == [["Matematika 11", "Integral", "Antiturunan"]]
+    assert body["actions"] == [
+        {"label": "Integral", "course_id": "course-one", "chapter_id": "ch-int", "lesson_id": "l2"}
+    ]
+    assert all(params == {"class_id": "class-one"} for _, params in paths)
+    body = ask(api, "integral tentu materi").json()["reply"]
+    assert body["actions"][0]["lesson_id"] == "l3"
+
+
+def test_search_without_a_match_or_topic_is_truthful(api, monkeypatch):
+    monkeypatch.setattr(student_assistant, "learning_data", catalogue_data([]))
+    body = ask(api, "cari materi fotosintesis").json()["reply"]
+    assert body["text"] == 'Belum ada materi tentang "fotosintesis" di modul kelasmu.'
+    assert "actions" not in body and "table" not in body
+    assert "Materi apa yang kamu cari" in ask(api, "cariin materi dong").json()["reply"]["text"]
+
+
+def test_materi_with_a_selected_reading_still_explains_the_reading(api, monkeypatch):
+    called = []
+
+    async def search(*args):
+        called.append(True)
+
+    monkeypatch.setattr(student_assistant, "search_lessons", search)
+
+    async def reading(*args):
+        raise HTTPException(503, "reading path taken")
+
+    monkeypatch.setattr(student_assistant, "reading", reading)
+    response = api.post(
+        "/api/ai/v1/student/assistant",
+        json={**PAYLOAD, "question": "jelaskan materi ini", "locale": "id", "source": SOURCE},
+        headers={"Authorization": "Bearer valid-student"},
+    )
+    assert response.status_code == 503 and not called
+
+
+@pytest.mark.parametrize(
+    "question, expected",
+    [
+        ("aku pengen bunuh diri", "hubungi 112"),
+        ("aku dibully di kelas", "guru BK"),
+        ("lagi stres banget sama tugas", "guru BK"),
+        ("kerjain tugas matematika aku dong", "tidak bisa memberi jawaban"),
+        ("kunci jawaban kuis IPA apa?", "tidak bisa memberi jawaban"),
+        ("tugas temanku apa aja?", "bukan data teman"),
+        ("halo kibo", "Halo! Kibo siap bantu"),
+        ("makasih ya kibo", "Sama-sama"),
+        ("berapa biaya SPP bulan ini?", "orang tuamu atau wali kelas"),
+    ],
+)
+def test_fixed_replies_never_read_school_data(api, monkeypatch, question, expected):
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    response = ask(api, question)
+    assert response.status_code == 200
+    assert expected in response.json()["reply"]["text"]
+
+
+def test_own_unfinished_work_still_reaches_homework(api, monkeypatch):
+    async def data(settings, authorization, path, params=None):
+        assert path == "/api/v1/learning/assignments"
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "tugas apa yang belum aku kerjain?").json()["reply"]
+    assert body["text"] == "Tidak ada tugas terbuka pada halaman ini."
+
+
+class FakeModel:
+    """Answers the intent prompt with `intent` and the reading prompt with an explanation."""
+
+    calls: list = []
+    intent = '{"intent": "off_topic", "topic": ""}'
+
+    def __init__(self, settings):
+        pass
+
+    async def complete(self, **kwargs):
+        FakeModel.calls.append(kwargs)
+        if kwargs["system_prompt"].startswith('Return ONLY JSON {"intent"'):
+            return FakeModel.intent
+        return '{"answered": true, "text": "Integral adalah kebalikan turunan."}'
+
+
+@pytest.fixture
+def model(monkeypatch):
+    FakeModel.calls = []
+    monkeypatch.setattr(student_assistant, "LlmClient", FakeModel)
+    return FakeModel
+
+
+def school_with_integral():
+    lesson = {
+        "id": "l2",
+        "title": {"en": "Antiderivatives", "id": "Antiturunan"},
+        "blocks": [{"type": "paragraph", "text": {"en": "Reverse.", "id": "Kebalikan turunan."}}],
+    }
+
+    async def data(settings, authorization, path, params=None):
+        if path == "/api/v1/learning/curriculum/courses":
+            return {"items": [{"id": "course-one"}], "next": None}
+        if path.endswith("/lessons/l2"):
+            return lesson
+        return {**CATALOGUE_COURSE, "class_id": "class-one", "publication": "published"}
+
+    return data
+
+
+def test_concept_question_explains_from_the_matching_reading(api, monkeypatch, model):
+    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
+    body = ask(api, "apa itu integral?").json()["reply"]
+    assert body["text"] == "Integral adalah kebalikan turunan."
+    assert body["source"] == "Antiturunan"
+    assert body["actions"][0] == {
+        "label": "Integral",
+        "course_id": "course-one",
+        "chapter_id": "ch-int",
+        "lesson_id": "l2",
+    }
+    assert "Kebalikan turunan." in model.calls[0]["user_message"]
+
+
+def test_paraphrase_is_routed_by_the_model_and_answered_by_the_tool(api, monkeypatch, model):
+    model.intent = '{"intent": "homework", "topic": ""}'
+
+    async def data(settings, authorization, path, params=None):
+        assert path == "/api/v1/learning/assignments"
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "kerjaan dari bu guru udah beres semua belum?").json()["reply"]
+    assert body["text"] == "Tidak ada tugas terbuka pada halaman ini."
+    # Only the question reaches the model: no school or personal data.
+    question = "kerjaan dari bu guru udah beres semua belum?"
+    assert model.calls[0]["user_message"] == "Question:\n" + question
+
+
+def test_model_routed_explain_uses_the_topic_it_extracted(api, monkeypatch, model):
+    model.intent = '{"intent": "explain", "topic": "integral"}'
+    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
+    body = ask(api, "bingung soal luas di bawah kurva").json()["reply"]
+    assert body["actions"][0]["chapter_id"] == "ch-int"
+
+
+@pytest.mark.parametrize(
+    "intent, expected",
+    [
+        ('{"intent": "self_harm", "topic": ""}', "hubungi 112"),
+        ('{"intent": "cheat", "topic": ""}', "tidak bisa memberi jawaban"),
+        ('{"intent": "off_topic", "topic": ""}', "hanya bisa bantu soal sekolahmu"),
+        ('{"intent": "delete_records", "topic": ""}', "hanya bisa bantu soal sekolahmu"),
+        ("not json", "hanya bisa bantu soal sekolahmu"),
+    ],
+)
+def test_model_verdicts_map_to_fixed_replies_and_failures_fall_back(
+    api, monkeypatch, model, intent, expected
+):
+    model.intent = intent
+
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    response = ask(api, "sesuatu yang tidak cocok kata kunci")
+    assert response.status_code == 200
+    assert expected in response.json()["reply"]["text"]

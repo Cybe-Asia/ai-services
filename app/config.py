@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     ] = "auto"
     # OpenAI reasoning models only; unset leaves the model's own default.
     ai_reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high"]] = None
+    # Sent as X-AI-Data-Tier to the CYBE AI Gateway; unset sends nothing (the Gateway then
+    # treats the request as sovereign and keeps it on local models).
+    ai_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
     ai_provider_message_max_chars: Optional[int] = Field(default=None, ge=1, le=32768)
     ai_max_tokens: int = Field(default=256, ge=1, le=2048)
 
@@ -55,6 +58,7 @@ class Settings(BaseSettings):
     assistant_max_tokens: int = Field(default=512, ge=1, le=2048)
     assistant_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     assistant_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
+    assistant_data_tier: Optional[Literal["standard", "restricted", "sovereign"]] = None
 
     chat_provider_protocol: Literal["openai_compatible", "anthropic", "openai"] = "openai"
     chat_provider_base_url: Optional[HttpUrl] = None
@@ -157,6 +161,7 @@ class Settings(BaseSettings):
                 "ai_reasoning_effort": getattr(self, f"{feature}_reasoning_effort"),
                 "ai_provider_message_max_chars": None,
                 "request_timeout_seconds": getattr(self, f"{feature}_timeout_seconds"),
+                "ai_data_tier": getattr(self, f"{feature}_data_tier", None),
             }
         )
 

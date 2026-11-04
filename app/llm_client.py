@@ -601,6 +601,8 @@ def _provider_headers(settings: Settings) -> dict[str, str]:
     headers = {"content-type": "application/json"}
     if settings.ai_provider_api_key:
         headers["authorization"] = f"Bearer {settings.ai_provider_api_key}"
+    if settings.ai_data_tier:
+        headers["x-ai-data-tier"] = settings.ai_data_tier
     return headers
 
 

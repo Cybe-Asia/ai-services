@@ -50,3 +50,19 @@ def test_streaming_filter_hides_split_thinking_chunks() -> None:
     visible += thinking_filter.flush()
 
     assert visible == "Ada 1 EOI."
+
+
+def test_assistant_data_tier_reaches_the_gateway_header_and_others_send_none():
+    from app.config import Settings
+    from app.llm_client import _provider_headers
+
+    settings = Settings(
+        assistant_provider_base_url="http://ai-gateway.ai-platform:8080/v1",
+        assistant_provider_api_key="school-token",
+        assistant_model="digital-school",
+        assistant_data_tier="standard",
+    )
+    headers = _provider_headers(settings.for_feature("assistant"))
+    assert headers["x-ai-data-tier"] == "standard"
+    assert headers["authorization"] == "Bearer school-token"
+    assert "x-ai-data-tier" not in _provider_headers(settings)
