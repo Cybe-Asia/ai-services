@@ -88,7 +88,8 @@ def planner_prompt(today: date, reading_open: bool) -> str:
         "schedule (their class timetable on given days); "
         "calendar (school calendar: holidays/libur, exam periods, school events, report-card "
         "day, semester dates; set calendar_kind to holiday, exam_period, school_activity, "
-        "semester, report_distribution or academic_year when the question names one); "
+        "semester, report_distribution or academic_year when the question names one; any "
+        "libur or holiday, including libur semester, is holiday); "
         "grades (their own released quiz/test/exam scores; perfect_only=true when they ask "
         "about 100 or perfect scores); "
         "upcoming_quizzes (quizzes or tests they still have to do); "
@@ -237,7 +238,7 @@ async def calendar(
     if not settings.sis_owner_url:
         return unsupported(payload, "kalender sekolah" if id_ else "the school calendar")
     today = datetime.now(sa.JAKARTA).date()
-    first, last = days or (today, today + timedelta(days=30))
+    first, last = days or (today, today + timedelta(days=CALENDAR_WINDOW_DAYS))
     data = await sa.learning_data(
         settings,
         authorization,
@@ -319,9 +320,10 @@ async def extracurricular(
         authorization,
         "/api/v1/sis-service/activities/student",
         {
-            "school_id": scope["schoolId"],
-            "tenant_id": scope["tenantId"],
-            "academic_year": scope["academicYear"],
+            # SIS activities take camelCase and reject unknown query fields.
+            "schoolId": scope["schoolId"],
+            "tenantId": scope["tenantId"],
+            "academicYear": scope["academicYear"],
         },
         base=settings.sis_owner_url,
     )

@@ -1086,7 +1086,7 @@ def test_extracurricular_lists_joined_clubs_and_open_ones(api, monkeypatch, agen
         if path.endswith("/context/student"):
             scope = {"schoolId": "s1", "tenantId": "t1", "academicYear": "2026/2027"}
             return {"classes": [scope]}
-        assert params == {"school_id": "s1", "tenant_id": "t1", "academic_year": "2026/2027"}
+        assert params == {"schoolId": "s1", "tenantId": "t1", "academicYear": "2026/2027"}
 
         def club(title, **extra):
             activity = {"title": {"en": title, "id": title}, "published": True}
