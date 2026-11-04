@@ -142,3 +142,8 @@ def test_compressed_owner_body_is_rejected_before_decoding(monkeypatch, encoding
     assert error.value.status_code == 503
     assert not stream.read
     assert stream.closed
+
+
+def test_reads_share_one_tls_context():
+    # Building a context loads the CA bundle; per read it cost ~0.7 s on a 100m CPU pod.
+    assert learning_client._tls() is learning_client._tls()

@@ -1,12 +1,21 @@
 """Bounded reads through Learning's current Auth/SIS authorization boundary."""
 
 import json
+import ssl
+from functools import lru_cache
 from typing import Optional
 
 import httpx
 from fastapi import HTTPException
 
 from app.config import Settings
+
+
+@lru_cache(maxsize=1)
+def _tls() -> ssl.SSLContext:
+    """One verify context per process (httpx's own rules, SSL_CERT_FILE included). Building it
+    loads the CA bundle and took ~0.7 s per read under the pod's 100m CPU limit."""
+    return httpx.create_ssl_context()
 
 
 async def learning_data(
@@ -26,7 +35,7 @@ async def learning_data(
         raise HTTPException(401, f"{subject} session required")
     try:
         async with httpx.AsyncClient(
-            timeout=settings.request_timeout_seconds, follow_redirects=False
+            timeout=settings.request_timeout_seconds, follow_redirects=False, verify=_tls()
         ) as client:
             async with client.stream(
                 "GET",
