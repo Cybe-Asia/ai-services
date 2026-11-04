@@ -949,3 +949,16 @@ def test_model_verdicts_map_to_fixed_replies_and_failures_fall_back(
     response = ask(api, "sesuatu yang tidak cocok kata kunci")
     assert response.status_code == 200
     assert expected in response.json()["reply"]["text"]
+
+
+def test_concept_reading_that_does_not_answer_points_to_the_chapter(api, monkeypatch, model):
+    async def unanswered(self, **kwargs):
+        model.calls.append(kwargs)
+        return '{"answered": false, "text": ""}'
+
+    monkeypatch.setattr(model, "complete", unanswered)
+    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
+    body = ask(api, "apa itu integral?").json()["reply"]
+    assert body["text"].startswith('Kibo menemukan bab "Integral" tentang "integral"')
+    assert "yang kamu pilih" not in body["text"]
+    assert body["actions"][0]["lesson_id"] == "l2"

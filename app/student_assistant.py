@@ -816,7 +816,10 @@ async def reading(
 
 
 async def explain_reading(
-    settings: Settings, authorization: str, payload: StudentAssistantRequest
+    settings: Settings,
+    authorization: str,
+    payload: StudentAssistantRequest,
+    not_answered: Optional[str] = None,
 ) -> dict:
     """Explain the selected published reading, or say it does not cover the question."""
     content, path, source = await reading(settings, authorization, payload)
@@ -841,6 +844,8 @@ async def explain_reading(
     title = translated(source["title"], payload.locale)
     if not verdict.answered:
         registry.count("assistant", "not_answered")
+        if not_answered:
+            return reply(not_answered, title, ["lessons"])
         return not_answered_reply(payload.locale, title)
     registry.count("assistant", "ok")
     return reply(verdict.text.strip(), title, ["lessons"])
@@ -872,7 +877,18 @@ async def explain_topic(
             )
         }
     )
-    result = await explain_reading(settings, authorization, selected)
+    query, chapter = " ".join(terms), action["label"]
+    result = await explain_reading(
+        settings,
+        authorization,
+        selected,
+        # Kibo picked the reading, so never "the reading you chose".
+        f'Kibo menemukan bab "{chapter}" tentang "{query}", tapi bacaan pertamanya belum '
+        "menjawab pertanyaanmu secara langsung. Buka babnya untuk membaca materinya."
+        if payload.locale == "id"
+        else f'Kibo found the chapter "{chapter}" about "{query}", but its first reading does '
+        "not answer your question directly. Open the chapter to read the material.",
+    )
     result["reply"]["actions"] = hits[:5]
     return result
 
