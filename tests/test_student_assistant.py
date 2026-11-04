@@ -962,3 +962,65 @@ def test_concept_reading_that_does_not_answer_points_to_the_chapter(api, monkeyp
     assert body["text"].startswith('Kibo menemukan bab "Integral" tentang "integral"')
     assert "yang kamu pilih" not in body["text"]
     assert body["actions"][0]["lesson_id"] == "l2"
+
+
+def results_data(pcts, released=True):
+    at = int(datetime(2026, 11, 3, 3, tzinfo=timezone.utc).timestamp() * 1000)
+
+    def item(i, pct):
+        return {
+            "course": {"id": "c1", "title": {"en": "Mathematics 7", "id": "Matematika 7"}},
+            "assessment": {
+                "id": f"a{i}",
+                "definition": {"kind": "exam", "title": {"en": f"Test {i}", "id": f"Ujian {i}"}},
+            },
+            "attempt": {
+                "state": "released" if released else "submitted",
+                "submitted_at": at - i * 86400000,
+                "result": (
+                    {"score": pct, "maximum": 100, "score_pct": pct, "passed": pct >= 70}
+                    if released
+                    else None
+                ),
+            },
+        }
+
+    async def data(settings, authorization, path, params=None):
+        assert path == "/api/v1/learning/assessments/mine"
+        assert params == {"class_id": "class-one"}
+        return {"items": [item(i, p) for i, p in enumerate(pcts)], "server_now": at}
+
+    return data
+
+
+def test_own_perfect_scores_are_listed(api, monkeypatch):
+    monkeypatch.setattr(student_assistant, "learning_data", results_data([100, 85.5, 100]))
+    body = ask(api, "Hasil nilai ujian saya ada yg dapat 100 ga ?").json()["reply"]
+    assert body["text"] == "Ya! Ada 2 hasil dengan nilai 100:"
+    assert [row[0] for row in body["table"]["rows"]] == ["Ujian 0", "Ujian 2"]
+    assert body["table"]["rows"][0][1:3] == ["Matematika 7", "100"]
+
+
+def test_no_perfect_score_names_the_best(api, monkeypatch):
+    monkeypatch.setattr(student_assistant, "learning_data", results_data([72, 91.5]))
+    body = ask(api, "ada yang 100 gak nilaiku?").json()["reply"]
+    assert body["text"] == "Belum ada yang 100. Nilai tertinggimu 91.5 di Ujian 1 (Matematika 7)."
+
+
+def test_all_released_results_and_none_unreleased(api, monkeypatch):
+    monkeypatch.setattr(student_assistant, "learning_data", results_data([64, 80]))
+    body = ask(api, "nilai ujian aku gimana?").json()["reply"]
+    assert body["text"] == "Ini 2 hasil ujian dan kuismu yang sudah dirilis:"
+    assert len(body["table"]["rows"]) == 2
+    monkeypatch.setattr(student_assistant, "learning_data", results_data([90], released=False))
+    body = ask(api, "nilai ujian aku gimana?").json()["reply"]
+    assert body["text"] == "Belum ada hasil ujian atau kuis yang dirilis gurumu."
+
+
+@pytest.mark.parametrize("question", ["nilai temanku berapa?", "aku ranking berapa di kelas?"])
+def test_other_students_scores_and_ranking_are_refused(api, monkeypatch, question):
+    async def data(*args, **kwargs):
+        raise AssertionError("no school read")
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    assert "bukan data teman" in ask(api, question).json()["reply"]["text"]

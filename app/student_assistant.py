@@ -742,6 +742,87 @@ async def find_lessons(
     return hits
 
 
+PERFECT_WORDS = r"(\b100\b|sempurna|perfect|full mark)"
+
+
+async def grades(settings: Settings, authorization: str, payload: StudentAssistantRequest) -> dict:
+    """The Student's own quiz and test results that their teacher has released. Learning sends
+    a result only once it is visible to the Student, so nothing unreleased can show here."""
+    data = await learning_data(
+        settings, authorization, "/api/v1/learning/assessments/mine", {"class_id": payload.class_id}
+    )
+    items = data.get("items")
+    if not isinstance(items, list) or len(items) > 2000:
+        raise HTTPException(503, "Student results unavailable")
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise HTTPException(503, "Student results unavailable")
+        attempt = item.get("attempt") or {}
+        result = attempt.get("result") if isinstance(attempt, dict) else None
+        if not isinstance(result, dict):
+            continue
+        pct, at = result.get("score_pct"), attempt.get("submitted_at")
+        definition = (item.get("assessment") or {}).get("definition") or {}
+        if not isinstance(pct, (int, float)) or not isinstance(definition, dict):
+            raise HTTPException(503, "Student results unavailable")
+        title = translated(definition.get("title"), payload.locale)
+        module = translated((item.get("course") or {}).get("title"), payload.locale)
+        results.append(
+            (at if type(at) is int else 0, float(pct), short(title, 120), short(module, 80))
+        )
+    id_ = payload.locale == "id"
+    source = "Hasil yang sudah dirilis gurumu" if id_ else "Results your teachers released"
+    if not results:
+        return reply(
+            "Belum ada hasil ujian atau kuis yang dirilis gurumu."
+            if id_
+            else "Your teachers haven't released any quiz or test results yet.",
+            source,
+            [],
+        )
+    results.sort(reverse=True)
+    shown = results
+    if re.search(PERFECT_WORDS, payload.question.casefold()):
+        shown = [r for r in results if r[1] >= 100]
+        if not shown:
+            best = max(results, key=lambda r: r[1])
+            return reply(
+                f"Belum ada yang 100. Nilai tertinggimu {best[1]:g} di {best[2]} ({best[3]})."
+                if id_
+                else f"None at 100 yet. Your best is {best[1]:g} in {best[2]} ({best[3]}).",
+                source,
+                [],
+            )
+        text = (
+            f"Ya! Ada {len(shown)} hasil dengan nilai 100:"
+            if id_
+            else f"Yes! {len(shown)} result(s) scored 100:"
+        )
+    else:
+        text = (
+            f"Ini {len(results)} hasil ujian dan kuismu yang sudah dirilis:"
+            if id_
+            else f"Here are your {len(results)} released quiz and test results:"
+        )
+    if len(shown) > 20:
+        text += " 20 terbaru ditampilkan." if id_ else " Showing the latest 20."
+    return reply(
+        text,
+        source,
+        [],
+        {
+            "columns": ["Ujian/kuis", "Modul", "Nilai", "Tanggal"]
+            if id_
+            else ["Quiz/test", "Module", "Score", "Date"],
+            "rows": [
+                [title, module, f"{pct:g}", jakarta_day(at, payload.locale) if at else "–"]
+                for at, pct, title, module in shown[:20]
+            ],
+        },
+    )
+
+
 async def search_lessons(
     settings: Settings, authorization: str, payload: StudentAssistantRequest, terms: list[str]
 ) -> dict:
@@ -901,6 +982,7 @@ class StudentIntent(BaseModel):
         "homework",
         "schedule",
         "games",
+        "grades",
         "improve",
         "search",
         "explain",
@@ -919,7 +1001,8 @@ def intent_system_prompt() -> str:
         'Return ONLY JSON {"intent": string, "topic": string}. Classify one question a '
         "secondary-school student asked the school assistant. intent is one of: "
         "homework (their assignments or PR), schedule (their classes or timetable), "
-        "games (games, XP or rewards they finished), improve (what to study more, weak areas, "
+        "games (games, XP or rewards they finished), grades (their own quiz, test or report "
+        "scores), improve (what to study more, weak areas, "
         "progress), search (find learning material on a topic), explain (explain a school "
         "concept or topic), self_harm (wanting to die or hurt themselves), wellbeing (sad, "
         "stressed, scared, bullied, family or friend trouble), cheat (wants answers to "
@@ -954,12 +1037,14 @@ EXAMPLES = {
     '• "Jadwal hari Senin apa saja?"\n'
     '• "Game apa saja yang sudah aku selesaikan?"\n'
     '• "Aku harus improve di bagian mana?"\n'
+    '• "Nilai ujianku ada yang 100?"\n'
     '• "Cariin materi pecahan"\n'
     "Untuk penjelasan materi, buka bacaan di Pelajaran lalu tanya Kibo dari sana.",
     "en": '• "Do I have assignments I haven\'t done?"\n'
     '• "What\'s my schedule on Monday?"\n'
     '• "Which games have I finished?"\n'
     '• "What should I improve?"\n'
+    '• "Did I score 100 on any test?"\n'
     '• "Find fractions"\n'
     "To explain a topic, open a reading in Lessons and ask Kibo there.",
 }
@@ -979,7 +1064,11 @@ CHEAT_WORDS = (
     r"jawabannya apa|kerjain soal|kerjakan soal|kerjain nomor|kerjakan nomor|kerjain pr|"
     r"kerjain tugas|kerjakan tugasku|kerjakan pr ku|do my homework|solve this|give me the answer)\b"
 )
-OTHER_PERSON_WORDS = r"\b(teman|temanku|teman-teman|kawan|classmate|classmates|friend|friends)\b"
+# Ranking compares a Student with others, so it is other people's records too.
+OTHER_PERSON_WORDS = (
+    r"\b(teman|temanku|teman-teman|kawan|classmate|classmates|friend|friends|ranking|rank|"
+    r"peringkat|juara kelas)\b"
+)
 GREETING = re.compile(
     r"^\W*(hai|halo|hallo|helo|hello|hi|hey|pagi|siang|sore|malam|selamat \w+|"
     r"assalamu.?alaikum)(\s+kibo)?\W*$"
@@ -1090,6 +1179,11 @@ def canned_reply(kind: str, locale: str) -> dict:
     )
 
 
+# The Student's own released results; checked before the account-records refusal.
+GRADE_WORDS = (
+    r"\b(nilai|nilaiku|skor|score|scores|rapor|raport|grade|grades|lulus|"
+    r"hasil (ujian|kuis|tes|ulangan|quiz|test|pts|pas))\b"
+)
 HOMEWORK_WORDS = r"\b(pr|homework|tugas|assignment|assignments)\b"
 SEARCH_WORDS = r"\b(cari|cariin|carikan|temukan|search|find)\b"
 # Alone, "materi" means a search only when no reading is selected ("jelaskan materi ini").
@@ -1127,6 +1221,8 @@ async def routed(
         return await schedule(settings, authorization, payload)
     if verdict.intent == "games":
         return await games(settings, authorization, payload)
+    if verdict.intent == "grades":
+        return await grades(settings, authorization, payload)
     if verdict.intent == "improve":
         return await improvements(settings, authorization, context, payload)
     if verdict.intent == "search":
@@ -1147,6 +1243,8 @@ async def answer_student(
     kind = fixed_kind(question)
     if kind is not None:
         result = canned_reply(kind, payload.locale)
+    elif re.search(GRADE_WORDS, question):
+        result = await grades(settings, authorization, payload)
     elif re.search(HOMEWORK_WORDS, question):
         result = await homework(settings, authorization, context, payload)
     elif re.search(SEARCH_WORDS, question) or (
