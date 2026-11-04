@@ -228,7 +228,7 @@ def test_schedule_answers_the_asked_day_grouped_with_school_subject_names():
         (at(26, 8, 15), at(26, 9), "Science · Year 7A"),
         (at(27, 7, 30), at(27, 8, 15), "English · Year 7A"),
     ]
-    text, table = schedule_text(meetings, "Apa jadwal pelajaranku hari Senin?", "id", now)
+    text, table, days = schedule_text(meetings, "Apa jadwal pelajaranku hari Senin?", "id", now)
     assert text == "Jadwalmu Senin, 26 Okt:"
     assert table == {
         "columns": ["Hari", "Jam", "Mapel"],
@@ -237,10 +237,10 @@ def test_schedule_answers_the_asked_day_grouped_with_school_subject_names():
             ["Senin, 26 Okt", "08.15–09.00", "IPA"],
         ],
     }
-    _, tomorrow = schedule_text(meetings, "What is on tomorrow?", "en", now)
+    _, tomorrow, _ = schedule_text(meetings, "What is on tomorrow?", "en", now)
     assert tomorrow["rows"] == [["Tuesday, 27 Oct", "07:30–08:15", "English"]]
     saturday = schedule_text(meetings, "Jadwal hari Sabtu?", "id", now)
-    assert saturday == ("Tidak ada kelas pada Sabtu, 31 Okt.", None)
+    assert saturday == ("Tidak ada kelas pada Sabtu, 31 Okt.", None, [])
     # No day named: the next upcoming meetings across days.
     assert len(schedule_text(meetings, "Jadwalku?", "id", now)[1]["rows"]) == 3
 
@@ -528,9 +528,10 @@ def test_homework_lists_unsubmitted_work_with_draft_state(api, monkeypatch):
         item = {"class_id": "class-one", "publication": "published", "points": 20}
         return {
             "items": [
-                {**item, "prompt_id": "Laporan praktikum", "attempts": []},
+                {**item, "id": "as-1", "prompt_id": "Laporan praktikum", "attempts": []},
                 {
                     **item,
+                    "id": "../bad",
                     "prompt_id": "Esai pecahan",
                     "attempts": [{"student_id": "student-one", "state": "draft"}],
                 },
@@ -550,6 +551,11 @@ def test_homework_lists_unsubmitted_work_with_draft_state(api, monkeypatch):
         ["Laporan praktikum", "20", "Belum dikerjakan"],
         ["Esai pecahan", "20", "Draf, belum dikirim"],
     ]
+    # Each open assignment opens itself; one without a usable id keeps the list button.
+    assert body["actions"] == [
+        {"label": "Laporan praktikum", "kind": "assignment", "assignment_id": "as-1"}
+    ]
+    assert body["destinations"] == ["assigned-work"]
 
 
 def test_games_lists_completed_games_with_module_and_chapter_titles(api, monkeypatch):
@@ -992,6 +998,10 @@ def test_own_perfect_scores_are_listed(api, monkeypatch):
     assert body["text"] == "Ya! Ada 2 hasil dengan nilai 100:"
     assert [row[0] for row in body["table"]["rows"]] == ["Ujian 0", "Ujian 2"]
     assert body["table"]["rows"][0][1:3] == ["Matematika 7", "100"]
+    assert body["actions"] == [
+        {"label": f"Ujian {i}", "kind": "quiz", "course_id": "c1", "assessment_id": f"a{i}"}
+        for i in (0, 2)
+    ]
 
 
 def test_no_perfect_score_names_the_best(api, monkeypatch):
@@ -1072,6 +1082,16 @@ def test_holiday_question_reads_the_school_calendar_and_is_rewritten(api, monkey
     body = ask(api, "Di bulan desember besok ada jadwal libur ga ?").json()["reply"]
     assert body["text"] == "Ramah: ini jawabannya ya!"
     assert body["table"]["rows"] == [["Senin, 21 Des – Sabtu, 2 Jan", "Libur semester", "Libur"]]
+    # The button opens the timetable's month on the holiday, not today.
+    assert body["actions"] == [
+        {
+            "label": "kalender Senin, 21 Des",
+            "kind": "schedule",
+            "date": "2026-12-21",
+            "view": "month",
+        }
+    ]
+    assert body["destinations"] == []
     planner, writer = agent.calls
     assert planner["user_message"] == "Question:\nDi bulan desember besok ada jadwal libur ga ?"
     assert "Today is" in planner["system_prompt"]
@@ -1110,6 +1130,9 @@ def test_planned_schedule_uses_the_date_range(api, monkeypatch, agent):
     monkeypatch.setattr(student_assistant, "learning_data", data)
     body = ask(api, "jadwal tanggal 2 januari").json()["reply"]
     assert body["table"]["rows"] == [["Jumat, 2 Jan", "08.00–09.00", "Matematika"]]
+    assert body["actions"] == [
+        {"label": "jadwal Jumat, 2 Jan", "kind": "schedule", "date": "2099-01-02", "view": "day"}
+    ]
 
 
 def test_extracurricular_lists_joined_clubs_and_open_ones(api, monkeypatch, agent):
@@ -1147,8 +1170,11 @@ def test_upcoming_quizzes_skip_done_and_closed_ones(api, monkeypatch, agent):
 
     def quiz(title, attempt=None, **definition):
         return {
-            "course": {"title": {"en": "Math 7", "id": "Matematika 7"}},
-            "assessment": {"definition": {"title": {"en": title, "id": title}, **definition}},
+            "course": {"id": "c1", "title": {"en": "Math 7", "id": "Matematika 7"}},
+            "assessment": {
+                "id": title.replace(" ", "-"),
+                "definition": {"title": {"en": title, "id": title}, **definition},
+            },
             "attempt": attempt,
         }
 
@@ -1169,6 +1195,13 @@ def test_upcoming_quizzes_skip_done_and_closed_ones(api, monkeypatch, agent):
     body = ask(api, "kuis apa yang belum aku kerjain").json()["reply"]
     assert [row[0] for row in body["table"]["rows"]] == ["Kuis B", "Kuis A", "Kuis E"]
     assert body["table"]["rows"][2][2] == "Dibuka 7 Nov 2026"
+    assert [a["assessment_id"] for a in body["actions"]] == ["Kuis-B", "Kuis-A", "Kuis-E"]
+    assert body["actions"][0] == {
+        "label": "Kuis B",
+        "kind": "quiz",
+        "course_id": "c1",
+        "assessment_id": "Kuis-B",
+    }
 
 
 def test_progress_lists_modules_least_done_first(api, monkeypatch, agent):

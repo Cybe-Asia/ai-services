@@ -289,14 +289,17 @@ async def calendar(
             ["schedule"],
         )
     rows.sort()
+    days = list(dict.fromkeys(date.fromisoformat(start) for start, _ in rows))[:5]
+    word = "kalender" if id_ else "calendar on"
     return sa.reply(
         f"Kalender sekolah {span}:" if id_ else f"School calendar for {span}:",
         source,
-        ["schedule"],
+        [],
         {
             "columns": ["Tanggal", "Acara", "Jenis"] if id_ else ["Date", "Event", "Kind"],
             "rows": [row for _, row in rows[:20]],
         },
+        [sa.schedule_action(f"{word} {sa.day_label(d, payload.locale)}", d, "month") for d in days],
     )
 
 
@@ -410,7 +413,10 @@ async def upcoming_quizzes(
         module = sa.short(
             sa.translated((item.get("course") or {}).get("title"), payload.locale), 80
         )
-        rows.append((closes if type(closes) is int else 2**62, [title, module, state, due]))
+        action = sa.quiz_action(
+            sa.short(title, 60), (item.get("course") or {}).get("id"), assessment.get("id")
+        )
+        rows.append((closes if type(closes) is int else 2**62, [title, module, state, due], action))
     source = "Kuis dan ujian dari gurumu" if id_ else "Your teachers' quizzes and tests"
     if not rows:
         return sa.reply(
@@ -420,19 +426,20 @@ async def upcoming_quizzes(
             source,
             ["lessons"],
         )
-    rows.sort()
+    rows.sort(key=lambda r: r[0])
     return sa.reply(
         f"Ada {len(rows)} kuis/ujian yang belum kamu selesaikan:"
         if id_
         else f"{len(rows)} quiz(zes)/test(s) still to do:",
         source,
-        ["lessons"],
+        ["lessons"] if len(rows) > 5 else [],
         {
             "columns": ["Kuis/ujian", "Modul", "Status", "Tutup"]
             if id_
             else ["Quiz/test", "Module", "Status", "Closes"],
-            "rows": [row for _, row in rows[:20]],
+            "rows": [row for _, row, _ in rows[:20]],
         },
+        [action for _, _, action in rows if action][:5],
     )
 
 

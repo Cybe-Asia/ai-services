@@ -95,7 +95,8 @@ def reply(
         # Clients render it as a real table (≤4 columns, ≤20 rows, ≤300 characters a cell).
         body["table"] = table
     if actions:
-        # Buttons that open one chapter (and reading) in Lessons; ≤5, label ≤80 characters.
+        # ≤5 buttons, label ≤80 characters, each opening one exact place: a chapter (and
+        # reading) in Lessons, a day of the timetable/calendar, one assignment or one quiz.
         body["actions"] = actions[:5]
     return {"contractVersion": 1, "reply": body}
 
@@ -110,6 +111,32 @@ def open_action(
     if lesson is not None:
         action["lesson_id"] = lesson
     return action
+
+
+def _ids(*values: object) -> bool:
+    return all(isinstance(v, str) and re.match(ID_PATTERN, v) for v in values)
+
+
+def schedule_action(label: str, day: date, view: Literal["day", "month"]) -> dict:
+    """Opens the timetable on `day` (view "month" shows the holidays of that month)."""
+    return {"label": short(label, 80), "kind": "schedule", "date": day.isoformat(), "view": view}
+
+
+def assignment_action(label: str, assignment: object) -> Optional[dict]:
+    if not _ids(assignment):
+        return None
+    return {"label": short(label, 80), "kind": "assignment", "assignment_id": assignment}
+
+
+def quiz_action(label: str, course: object, assessment: object) -> Optional[dict]:
+    if not _ids(course, assessment):
+        return None
+    return {
+        "label": short(label, 80),
+        "kind": "quiz",
+        "course_id": course,
+        "assessment_id": assessment,
+    }
 
 
 def short(value: str, limit: int = 140) -> str:
@@ -149,7 +176,7 @@ async def homework(
     items = data.get("items")
     if not isinstance(items, list) or len(items) > 50 or "next" not in data:
         raise HTTPException(503, "Student assignments unavailable")
-    rows = []
+    rows, actions = [], []
     for item in items:
         if not isinstance(item, dict) or item.get("class_id") != payload.class_id:
             raise HTTPException(503, "Student assignments unavailable")
@@ -180,6 +207,8 @@ async def homework(
             else:
                 state = "Draft, not submitted" if attempts else "Not started"
             rows.append([short(prompt), "–" if points is None else str(points), state])
+            if action := assignment_action(short(prompt, 60), item.get("id")):
+                actions.append(action)
     id_ = payload.locale == "id"
     if rows:
         text = (
@@ -207,11 +236,13 @@ async def homework(
         if rows
         else None
     )
+    more = len(rows) > len(actions[:5]) or data["next"] is not None
     return reply(
         text,
         "Tugas terpublikasi dari gurumu" if id_ else "Your teacher's published assignments",
-        ["assigned-work"],
+        ["assigned-work"] if more or not rows else [],
         table,
+        actions,
     )
 
 
@@ -286,9 +317,9 @@ def schedule_text(
     locale: str,
     now: datetime,
     days: Optional[tuple[date, date]] = None,
-) -> tuple[str, Optional[dict]]:
+) -> tuple[str, Optional[dict], list[date]]:
     """Class meetings as a table: the planner's date range, else the day the question names,
-    else the next upcoming (≤ 12)."""
+    else the next upcoming (≤ 12); with the days shown, in order."""
     clock = "%H.%M" if locale == "id" else "%H:%M"
     rows = [
         (
@@ -309,17 +340,23 @@ def schedule_text(
         )
         if not rows:
             return (
-                f"Tidak ada kelas pada {span}." if locale == "id" else f"No classes on {span}."
-            ), None
+                (f"Tidak ada kelas pada {span}." if locale == "id" else f"No classes on {span}."),
+                None,
+                [],
+            )
         text = f"Jadwalmu {span}:" if locale == "id" else f"Your classes on {span}:"
     elif day is not None:
         rows = [row for row in rows if row[0].date() == day]
         if not rows:
             return (
-                f"Tidak ada kelas pada {day_label(day, locale)}."
-                if locale == "id"
-                else f"No classes on {day_label(day, locale)}."
-            ), None
+                (
+                    f"Tidak ada kelas pada {day_label(day, locale)}."
+                    if locale == "id"
+                    else f"No classes on {day_label(day, locale)}."
+                ),
+                None,
+                [],
+            )
         rows = rows[:20]
         text = (
             f"Jadwalmu {day_label(day, locale)}:"
@@ -330,22 +367,30 @@ def schedule_text(
         rows = [row for row in rows if row[1] >= now][:12]
         if not rows:
             return (
-                "Belum ada jadwal kelas mendatang yang dipublikasikan."
-                if locale == "id"
-                else "No upcoming class meetings have been published."
-            ), None
+                (
+                    "Belum ada jadwal kelas mendatang yang dipublikasikan."
+                    if locale == "id"
+                    else "No upcoming class meetings have been published."
+                ),
+                None,
+                [],
+            )
         text = "Kelas berikutnya:" if locale == "id" else "Your next classes:"
-    return text, {
-        "columns": ["Hari", "Jam", "Mapel"] if locale == "id" else ["Day", "Time", "Subject"],
-        "rows": [
-            [
-                day_label(begins.date(), locale),
-                f"{begins.strftime(clock)}–{finishes.strftime(clock)}",
-                meeting_title(title, locale),
-            ]
-            for begins, finishes, title in rows
-        ],
-    }
+    return (
+        text,
+        {
+            "columns": ["Hari", "Jam", "Mapel"] if locale == "id" else ["Day", "Time", "Subject"],
+            "rows": [
+                [
+                    day_label(begins.date(), locale),
+                    f"{begins.strftime(clock)}–{finishes.strftime(clock)}",
+                    meeting_title(title, locale),
+                ]
+                for begins, finishes, title in rows
+            ],
+        },
+        list(dict.fromkeys(begins.date() for begins, _, _ in rows)),
+    )
 
 
 async def schedule(
@@ -380,14 +425,17 @@ async def schedule(
         ):
             raise HTTPException(503, "Student timetable unavailable")
         meetings.append((start, end, title))
-    text, table = schedule_text(
+    text, table, shown = schedule_text(
         meetings, payload.question, payload.locale, datetime.now(JAKARTA), days
     )
+    word = "jadwal" if payload.locale == "id" else "schedule for"
+    actions = [schedule_action(f"{word} {day_label(d, payload.locale)}", d, "day") for d in shown]
     return reply(
         text,
         "Jadwal kelas dari sekolah" if payload.locale == "id" else "Your school's class timetable",
-        ["schedule"],
+        [] if actions else ["schedule"],
         table,
+        actions,
     )
 
 
@@ -789,9 +837,9 @@ PERFECT_WORDS = r"(\b100\b|sempurna|perfect|full mark)"
 
 async def released_results(
     settings: Settings, authorization: str, payload: StudentAssistantRequest
-) -> list[tuple[int, float, str, str]]:
-    """(submitted_at, score_pct, title, module) of the Student's own results their teacher has
-    released. Learning sends a result only once it is visible to the Student."""
+) -> list[tuple[int, float, str, str, Optional[dict]]]:
+    """(submitted_at, score_pct, title, module, quiz action) of the Student's own results their
+    teacher has released. Learning sends a result only once it is visible to the Student."""
     data = await learning_data(
         settings, authorization, "/api/v1/learning/assessments/mine", {"class_id": payload.class_id}
     )
@@ -813,7 +861,17 @@ async def released_results(
         title = translated(definition.get("title"), payload.locale)
         module = translated((item.get("course") or {}).get("title"), payload.locale)
         results.append(
-            (at if type(at) is int else 0, float(pct), short(title, 120), short(module, 80))
+            (
+                at if type(at) is int else 0,
+                float(pct),
+                short(title, 120),
+                short(module, 80),
+                quiz_action(
+                    short(title, 60),
+                    (item.get("course") or {}).get("id"),
+                    (item.get("assessment") or {}).get("id"),
+                ),
+            )
         )
     return results
 
@@ -859,8 +917,9 @@ async def lowest_results(
             "columns": ["Ujian/kuis", "Modul", "Nilai"]
             if id_
             else ["Quiz/test", "Module", "Score"],
-            "rows": [[title, module, f"{pct:g}"] for _, pct, title, module in low],
+            "rows": [[title, module, f"{pct:g}"] for _, pct, title, module, _ in low],
         },
+        [r[4] for r in low if r[4]],
     )
 
 
@@ -882,7 +941,7 @@ async def grades(
             source,
             [],
         )
-    results.sort(reverse=True)
+    results.sort(key=lambda r: r[:4], reverse=True)
     shown = results
     if (
         perfect_only
@@ -922,9 +981,10 @@ async def grades(
             else ["Quiz/test", "Module", "Score", "Date"],
             "rows": [
                 [title, module, f"{pct:g}", jakarta_day(at, payload.locale) if at else "–"]
-                for at, pct, title, module in shown[:20]
+                for at, pct, title, module, _ in shown[:20]
             ],
         },
+        [r[4] for r in shown if r[4]][:5],
     )
 
 
