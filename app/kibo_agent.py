@@ -87,10 +87,13 @@ def planner_prompt(today: date, reading_open: bool) -> str:
         '"YYYY-MM-DD"|null, "calendar_kind": string|null, "perfect_only": boolean, '
         '"topic": string, "question": string}. Tools: '
         "homework (their assignments or PR, done or not); "
-        "schedule (their class timetable on given days); "
-        "calendar (school calendar: holidays/libur, exam periods, school events, report-card "
-        "day, semester dates; set calendar_kind to holiday, exam_period, school_activity, "
-        "semester, report_distribution or academic_year when the question names one; any "
+        "schedule (their class timetable on given days, also a yes/no question whether a "
+        "weekday or the weekend is a school day, e.g. 'sabtu libur?', 'hari minggu masuk "
+        "gak?': dates = those days; when or how long a holiday lasts is calendar); "
+        "calendar (published school calendar: named holidays/libur, exam periods, school "
+        "events, report-card day, semester dates; set calendar_kind to holiday, exam_period, "
+        "school_activity, semester, report_distribution or academic_year when the question "
+        "names one; any "
         "libur or holiday, including libur semester, is holiday); "
         "grades (their own released quiz/test/exam scores; perfect_only=true when they ask "
         "about 100 or perfect scores); "

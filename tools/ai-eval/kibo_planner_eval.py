@@ -413,6 +413,33 @@ CASES = json.loads(r"""[
     ]
    ]
   }
+ ],
+ [
+  "Hari sabtu dan minggu berarti libur ?",
+  "schedule",
+  {
+   "history": [
+    [
+     "jadwal minggu ini apa aja?",
+     "Jadwalmu Kamis 5 Nov – Senin 9 Nov: Kamis Matematika, Jumat PPKn, Senin Fisika."
+    ]
+   ]
+  }
+ ],
+ [
+  "sabtu sekolah gak?",
+  "schedule"
+ ],
+ [
+  "hari minggu masuk ga sih",
+  "schedule"
+ ],
+ [
+  "libur sekolah berikutnya kapan?",
+  "calendar",
+  {
+   "calendar_kind": "holiday"
+  }
  ]
 ]""")
 
