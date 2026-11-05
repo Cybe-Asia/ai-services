@@ -840,7 +840,9 @@ async def find_lessons(
                 hits.append(
                     (
                         [short(module), short(chapter_title), short(lesson_title)],
-                        open_action(chapter_title, course_id, chapter.get("id"), lesson_id),
+                        open_action(
+                            f"{module} · {chapter_title}", course_id, chapter.get("id"), lesson_id
+                        ),
                     )
                 )
     return hits
