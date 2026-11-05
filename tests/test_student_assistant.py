@@ -1349,3 +1349,40 @@ def test_follow_up_about_another_student_keeps_the_safety_reply(api, monkeypatch
 )
 def test_earlier_turns_are_bounded(api, history):
     assert ask_with_history(api, "kalau Januari?", history).status_code == 422
+
+
+def test_two_part_question_reads_both_and_keeps_both_buttons(api, monkeypatch, agent):
+    start = int(datetime(2099, 1, 2, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    agent.plan = plan(
+        tool="schedule", date_from="2099-01-02", date_to="2099-01-02", also="calendar"
+    )
+
+    async def data(settings, authorization, path, params=None, **kw):
+        if kw.get("base") == SIS:
+            entry = {"startDate": "2099-01-02", "endDate": "2099-01-02", "title": "Class meeting"}
+            return {
+                "educationCalendar": {"items": [{"entry": {**entry, "kind": "school_activity"}}]}
+            }
+        meeting = {"class_id": "class-one", "title": "Math", "starts_at": start}
+        return {"class_id": "class-one", "items": [{**meeting, "ends_at": start + 3600000}]}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "jadwal sama acara sekolah 2 januari apa?").json()["reply"]
+    assert body["text"] == "Ramah: ini jawabannya ya!"
+    assert body["table"]["rows"] == [["Jumat, 2 Jan", "08.00–09.00", "Matematika"]]
+    assert [a["label"] for a in body["actions"]] == ["jadwal Jumat, 2 Jan", "kalender Jumat, 2 Jan"]
+    # The calendar table is not shown, so its rows reach the writer as text.
+    assert "Class meeting" in agent.calls[-1]["user_message"]
+
+
+def test_reply_follows_the_language_of_the_question(api, monkeypatch, agent):
+    agent.plan = plan(tool="homework", lang="en")
+
+    async def data(settings, authorization, path, params=None, **kw):
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    agent.written = "not json"
+    assert ask(api, "any homework left?").json()["reply"]["text"] == (
+        "There are no open assignments on this page."
+    )

@@ -12,7 +12,8 @@ from app.llm_client import LlmClient
 from app.student_assistant import JAKARTA, StudentAssistantRequest
 
 # [question, expected tool, optional checks: calendar_kind, perfect_only, date_from (+days),
-#  month, history ([[question, answer], ...]) with standalone (words the rewrite must contain)]
+#  month, history ([[question, answer], ...]) with standalone (words the rewrite must contain),
+#  also (the second read of a two-part question), lang (id|en)]
 CASES = json.loads(r"""[
  [
   "ada pr gak",
@@ -28,7 +29,10 @@ CASES = json.loads(r"""[
  ],
  [
   "Do I have any homework left?",
-  "homework"
+  "homework",
+  {
+   "lang": "en"
+  }
  ],
  [
   "jadwal besok apa?",
@@ -109,7 +113,10 @@ CASES = json.loads(r"""[
  ],
  [
   "what were my test scores?",
-  "grades"
+  "grades",
+  {
+   "lang": "en"
+  }
  ],
  [
   "kuis apa yang belum aku kerjain",
@@ -121,7 +128,10 @@ CASES = json.loads(r"""[
  ],
  [
   "any quizzes due soon?",
-  "upcoming_quizzes"
+  "upcoming_quizzes",
+  {
+   "lang": "en"
+  }
  ],
  [
   "aku udah sampai mana belajarnya?",
@@ -358,14 +368,16 @@ CASES = json.loads(r"""[
   "what's my schedule tomorrow?",
   "schedule",
   {
-   "date_from": 1
+   "date_from": 1,
+   "lang": "en"
   }
  ],
  [
   "when is the next holiday?",
   "calendar",
   {
-   "calendar_kind": "holiday"
+   "calendar_kind": "holiday",
+   "lang": "en"
   }
  ],
  [
@@ -440,6 +452,58 @@ CASES = json.loads(r"""[
   {
    "calendar_kind": "holiday"
   }
+ ],
+ [
+  "ada pr sama ulangan gak besok?",
+  "homework",
+  {
+   "also": "upcoming_quizzes"
+  }
+ ],
+ [
+  "jadwal besok sama tugas yang belum aku kerjain apa aja?",
+  "schedule",
+  {
+   "also": "homework",
+   "date_from": 1
+  }
+ ],
+ [
+  "nilai aku gimana dan aku harus improve di mana?",
+  "grades",
+  {
+   "also": "improve"
+  }
+ ],
+ [
+  "Practice 5-min quiz",
+  "upcoming_quizzes",
+  {
+   "lang": "en"
+  }
+ ],
+ [
+  "kapan libur berikutnya?",
+  "calendar",
+  {
+   "lang": "id"
+  }
+ ],
+ [
+  "Ada PR sama kuis yang belum aku kerjain?",
+  "homework",
+  {
+   "also": "upcoming_quizzes",
+   "lang": "id"
+  }
+ ],
+ [
+  "Do I have unfinished homework or quizzes?",
+  "homework",
+  {
+   "also": "upcoming_quizzes",
+   "lang": "en"
+  }
  ]
 ]""")
 
@@ -471,6 +535,10 @@ async def main() -> None:
             misses.append(f"{question} -> error {type(exc).__name__}")
             continue
         good = plan.tool == want
+        if "also" in checks:  # a two-part question: both reads, in either order
+            good = {plan.tool, plan.also} == {want, checks["also"]}
+        if good and "lang" in checks:
+            good = plan.lang == checks["lang"]
         if good and "calendar_kind" in checks:
             good = plan.calendar_kind == checks["calendar_kind"]
         if good and "perfect_only" in checks:
