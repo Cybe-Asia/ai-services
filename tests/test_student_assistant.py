@@ -1386,3 +1386,25 @@ def test_reply_follows_the_language_of_the_question(api, monkeypatch, agent):
     assert ask(api, "any homework left?").json()["reply"]["text"] == (
         "There are no open assignments on this page."
     )
+
+
+def test_quizzes_on_the_asked_day_come_first_and_are_named(api, monkeypatch, agent):
+    agent.plan = plan(tool="upcoming_quizzes", date_from="2026-11-07", date_to="2026-11-07")
+    agent.written = "not json"
+    now = int(datetime(2026, 11, 4, 3, tzinfo=timezone.utc).timestamp() * 1000)
+    day = 86400000
+
+    def quiz(title, **definition):
+        return {
+            "course": {"id": "c1", "title": {"en": "Math 7", "id": "Matematika 7"}},
+            "assessment": {"id": title, "definition": {"title": {"id": title}, **definition}},
+        }
+
+    async def data(settings, authorization, path, params=None, **kw):
+        items = [quiz("A", closes_at=now + day), quiz("E", opens_at=now + 3 * day)]
+        return {"server_now": now, "items": items}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "sabtu ada ulangan gak?").json()["reply"]
+    assert [row[0] for row in body["table"]["rows"]] == ["E", "A"]
+    assert body["text"].startswith("1 kuis/ujian dibuka atau ditutup pada Sabtu, 7 Nov.")

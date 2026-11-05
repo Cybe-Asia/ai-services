@@ -420,9 +420,18 @@ async def extracurricular(
 
 
 async def upcoming_quizzes(
-    settings: Settings, authorization: str, payload: sa.StudentAssistantRequest
+    settings: Settings,
+    authorization: str,
+    payload: sa.StudentAssistantRequest,
+    days: Optional[tuple[date, date]] = None,
 ) -> dict:
+    """Quizzes still to do; with planned days, those opening or closing on them come first."""
     id_ = payload.locale == "id"
+    if days is not None:
+        start, end = (
+            int(datetime.combine(d, datetime.min.time(), sa.JAKARTA).timestamp() * 1000)
+            for d in (days[0], days[1] + timedelta(days=1))
+        )
     data = await sa.learning_data(
         settings,
         authorization,
@@ -464,7 +473,17 @@ async def upcoming_quizzes(
         action = sa.quiz_action(
             sa.short(title, 60), (item.get("course") or {}).get("id"), assessment.get("id")
         )
-        rows.append((closes if type(closes) is int else 2**62, [title, module, state, due], action))
+        on_days = days is not None and any(
+            type(t) is int and start <= t < end for t in (opens, closes)
+        )
+        rows.append(
+            (
+                not on_days,
+                closes if type(closes) is int else 2**62,
+                [title, module, state, due],
+                action,
+            )
+        )
     source = "Kuis dan ujian dari gurumu" if id_ else "Your teachers' quizzes and tests"
     if not rows:
         return sa.reply(
@@ -474,20 +493,38 @@ async def upcoming_quizzes(
             source,
             ["lessons"],
         )
-    rows.sort(key=lambda r: r[0])
-    return sa.reply(
+    rows.sort(key=lambda r: r[:2])
+    text = (
         f"Ada {len(rows)} kuis/ujian yang belum kamu selesaikan:"
         if id_
-        else f"{len(rows)} quiz(zes)/test(s) still to do:",
+        else f"{len(rows)} quiz(zes)/test(s) still to do:"
+    )
+    if days is not None:
+        span, dated = _span(*days, payload.locale), sum(1 for r in rows if not r[0])
+        text = (
+            (
+                f"{dated} kuis/ujian dibuka atau ditutup pada {span}. "
+                if dated
+                else f"Tidak ada kuis/ujian yang dibuka atau ditutup pada {span}. "
+            )
+            if id_
+            else (
+                f"{dated} quiz(zes)/test(s) open or close on {span}. "
+                if dated
+                else f"No quiz or test opens or closes on {span}. "
+            )
+        ) + text
+    return sa.reply(
+        text,
         source,
         ["lessons"] if len(rows) > 5 else [],
         {
             "columns": ["Kuis/ujian", "Modul", "Status", "Tutup"]
             if id_
             else ["Quiz/test", "Module", "Status", "Closes"],
-            "rows": [row for _, row, _ in rows[:20]],
+            "rows": [row for _, _, row, _ in rows[:20]],
         },
-        [action for _, _, action in rows if action][:5],
+        [action for _, _, _, action in rows if action][:5],
     )
 
 
@@ -592,7 +629,7 @@ async def answer(
         if tool == "grades":
             return await sa.grades(settings, authorization, payload, verdict.perfect_only)
         if tool == "upcoming_quizzes":
-            return await upcoming_quizzes(settings, authorization, payload)
+            return await upcoming_quizzes(settings, authorization, payload, days)
         if tool == "progress":
             return await progress(settings, authorization, payload)
         if tool == "games":

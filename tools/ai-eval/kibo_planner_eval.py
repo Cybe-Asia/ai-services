@@ -243,7 +243,10 @@ CASES = json.loads(r"""[
  ],
  [
   "besok ada ulangan gak",
-  "upcoming_quizzes"
+  "upcoming_quizzes",
+  {
+   "date_from": 1
+  }
  ],
  [
   "libur akhir pekan ini sampai kapan?",
@@ -457,7 +460,8 @@ CASES = json.loads(r"""[
   "ada pr sama ulangan gak besok?",
   "homework",
   {
-   "also": "upcoming_quizzes"
+   "also": "upcoming_quizzes",
+   "date_from": 1
   }
  ],
  [
@@ -503,6 +507,13 @@ CASES = json.loads(r"""[
   {
    "also": "upcoming_quizzes",
    "lang": "en"
+  }
+ ],
+ [
+  "lusa ada kuis apa aja?",
+  "upcoming_quizzes",
+  {
+   "date_from": 2
   }
  ]
 ]""")
