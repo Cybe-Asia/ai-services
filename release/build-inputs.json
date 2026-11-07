@@ -9,7 +9,7 @@
     "app/kibo_agent.py": "76a10b151fa18e789cb06a0a631c4acfbb6c092eae87782886387971def398f8",
     "app/learning_client.py": "3323b5cd3b27d79bc5ac0513c3f6b12e548f4345de976e07fbaab50f49b5c035",
     "app/llm_client.py": "13be90ca94ad1f329d0fed23568a8374cc285823484baf84750198575aa4be70",
-    "app/main.py": "3eab29079d3fe386d15c1561e6eb5c10a328e8fc8124a6a21703acf187929d99",
+    "app/main.py": "c383a438a620fe86ea3222fd6532341a301f2e49b4139390d4cff04c46d347fc",
     "app/metrics.py": "e96f5ba8c5397a630de653345bd632ec589b8b38dfaf93dc735c22b86802bf2f",
     "app/policy.py": "4d69f0fa4436d49a6d37a9dd4a0ba5c23c17c94cbc7d4a59c39b4e59e283c853",
     "app/recitation.py": "1364f561232ea2de4cf8710426967d9899aa4ab817b1b878abccf56643c9f866",
@@ -26,7 +26,8 @@
     "app/teacher_essay_review.py": "c9463cefa7c1659ab8cbbd663d2a2ce8659b0f71279fffd92fd2c2a0fd8bf04c",
     "app/teacher_question_drafts.py": "01f643486d5e18014e710fd53077f1d3d92086766873c49f4977a4e2654cbf2f",
     "app/thread_store.py": "5d9542616b11087877248991ea5ecfc1fdc50a951316c47d11c27ec577ca70dd",
-    "requirements.txt": "0bae8305d4d72e890f0f3eaa57bafbc5c525e4577261912cb719365aaf88f64c"
+    "requirements.txt": "0bae8305d4d72e890f0f3eaa57bafbc5c525e4577261912cb719365aaf88f64c",
+    "app/teacher_insight.py": "15315fcf47037a176762b668e4dcffef59e3d1a687725db385ff66331096a5ee"
   },
   "scope": "approved current web integration; school-staging; no automatic GitOps or production promotion"
 }

@@ -52,6 +52,7 @@ from app.teacher_essay_review import (
     review_essays,
     review_internal,
 )
+from app.teacher_insight import ConclusionRequest, conclude
 from app.teacher_question_drafts import DraftRequest, draft_questions
 from app.thread_store import ThreadNotFound, ThreadStore
 
@@ -534,6 +535,39 @@ async def teacher_chapter_summary(
         result = await asyncio.wait_for(summarize_chapter(settings, authorization, payload), 55)
     except TimeoutError as exc:
         raise HTTPException(503, "Chapter summary unavailable") from exc
+    return Response(
+        json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/api/ai/v1/teacher/insight-conclusion")
+async def teacher_insight_conclusion(
+    request: Request,
+    authorization: Optional[str] = AUTH_HEADER,
+    settings: Settings = SETTINGS_DEPENDENCY,
+) -> Response:
+    """AI findings on one class's or student's Insight (ADR 0026 slice 4); nothing is saved."""
+
+    async def bounded_body() -> bytes:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 1024:
+                raise HTTPException(413, "Insight conclusion request too large")
+            body.extend(chunk)
+        return bytes(body)
+
+    try:
+        body = await asyncio.wait_for(bounded_body(), 5)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Insight conclusion request timed out") from exc
+    try:
+        payload = ConclusionRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "Invalid insight conclusion request") from exc
+    try:
+        result = await asyncio.wait_for(conclude(settings, authorization, payload), 55)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Insight conclusion unavailable") from exc
     return Response(
         json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
     )
