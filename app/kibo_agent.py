@@ -267,6 +267,49 @@ async def _complete_json(scoped: Settings, system: str, user: str, stream: bool 
     return answer
 
 
+# Questions whose whole wording names one read: they skip the planner call (about 2 s). Anything
+# longer, with a reason word, two asks, earlier turns or an open reading still goes to the planner.
+_WHY = (
+    r"(?!.*\b(kenapa|knp|kok|jelek|kecil|rendah|turun|salah|buruk|why|bad|low|100|sempurna|"
+    r"perfect|sama|dan|and)\b)"
+)
+_HOMEWORK = (
+    r"^\W*(ada\s+)?(pr|tugas)(\s+(apa|aku|ku|aja|saja|gak|ga|nggak|ngga|enggak|ya|dong|"
+    r"yang belum (dikerjakan|dikerjain|aku kerjain)|hari ini|minggu ini))*\W*$"
+)
+_DAY = r"^\W*(jadwal|pelajaran)(\s+(aku|ku|kelas))?\s+({})(\s+(apa|apa aja|apa saja))?\W*$"
+_SHORTCUTS: tuple[tuple[re.Pattern, str, Optional[int], Optional[str]], ...] = (
+    (re.compile(_WHY + _HOMEWORK), "homework", None, "id"),
+    (re.compile(_DAY.format("hari ini")), "schedule", 0, "id"),
+    (re.compile(_DAY.format("besok")), "schedule", 1, "id"),
+    (
+        re.compile(_WHY + r"^\W*(nilai|nilaiku)(\s+[\w-]+){0,4}\s+(berapa|gimana|bagaimana)\W*$"),
+        "grades",
+        None,
+        "id",
+    ),
+    # The fixed question of the dashboard tip (client kiboInsightQuestion).
+    (re.compile(r"^\W*apa yang paling perlu aku tingkatkan\W*$"), "improve", None, "id"),
+    (re.compile(r"^\W*what should i improve most\W*$"), "improve", None, "en"),
+)
+
+
+def shortcut(payload: sa.StudentAssistantRequest) -> Optional[Plan]:
+    """The plan for a question that names its read in full, or None (ask the planner)."""
+    if payload.history or payload.source is not None:
+        return None
+    question = " ".join(payload.question.casefold().split())
+    if sa.GREETING.match(question) or sa.THANKS.match(question):
+        return Plan(tool="smalltalk")
+    for pattern, tool, offset, lang in _SHORTCUTS:
+        if pattern.match(question):
+            if offset is None:
+                return Plan(tool=tool, lang=lang)
+            day = (datetime.now(sa.JAKARTA).date() + timedelta(days=offset)).isoformat()
+            return Plan(tool=tool, date_from=day, date_to=day, lang=lang)
+    return None
+
+
 async def plan(settings: Settings, payload: sa.StudentAssistantRequest) -> Optional[Plan]:
     """The question and the Student's own earlier turns (texts only) reach the planner."""
     scoped = _assistant(settings, settings.assistant_planner_model)
@@ -663,7 +706,11 @@ async def answer(
     payload: sa.StudentAssistantRequest,
 ) -> Optional[dict]:
     """The planned answer, or None when the planner is unavailable (keyword router instead)."""
-    verdict = await plan(settings, payload)
+    verdict = shortcut(payload)
+    if verdict is not None:
+        registry.count("assistant", "plan_shortcut")
+    else:
+        verdict = await plan(settings, payload)
     if verdict is None:
         return None
     if verdict.question and payload.history:
@@ -713,7 +760,9 @@ async def answer(
         if tool == "search":
             return await sa.search_lessons(settings, authorization, payload, terms)
         if tool == "smalltalk":
-            return sa.canned_reply("greeting", payload.locale)
+            # "makasih" keeps its own fixed reply when the writer cannot reword it.
+            kind = sa.fixed_kind(payload.question.casefold())
+            return sa.canned_reply(kind if kind == "thanks" else "greeting", payload.locale)
         return unsupported(payload, verdict.topic)
 
     if verdict.also and verdict.also != tool and tool in DATA_TOOLS.__args__:

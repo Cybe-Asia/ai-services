@@ -1597,3 +1597,53 @@ def test_json_text_decodes_split_escapes_and_waits_for_the_text_key():
     assert "".join(text.feed(raw[at : at + 3]) for at in range(0, len(raw), 3)) == (
         'A\nB \u00e9 \U0001f600 "q"'
     )
+
+
+def test_a_question_that_names_its_read_skips_the_planner(api, monkeypatch, agent):
+    agent.plan = plan(tool="unsupported")  # would answer wrongly if the planner were asked
+
+    async def data(settings, authorization, path, params=None, **kw):
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    assert ask(api, "Ada PR apa minggu ini?").json()["reply"]["text"] == "Ramah: ini jawabannya ya!"
+    assert [c["system_prompt"][:12] for c in agent.calls] == ["KIBO_WRITER."]
+
+
+@pytest.mark.parametrize(
+    "question,tool,day",
+    [
+        ("halo kibo", "smalltalk", None),
+        ("jadwal besok apa?", "schedule", 1),
+        ("Jadwal hari ini", "schedule", 0),
+        ("nilai kuis matematika aku berapa", "grades", None),
+        ("Apa yang paling perlu aku tingkatkan?", "improve", None),
+        ("ada pr sama ulangan gak besok?", None, None),
+        ("nilaiku kok kecil banget sih", None, None),
+        ("nilai aku yang paling jelek apa?", None, None),
+        ("absen aku hari ini gimana", None, None),
+    ],
+)
+def test_shortcut_takes_only_whole_plain_questions(question, tool, day):
+    from datetime import timedelta
+
+    from app import kibo_agent
+
+    got = kibo_agent.shortcut(
+        student_assistant.StudentAssistantRequest(question=question, locale="id", class_id="c")
+    )
+    assert (got.tool if got else None) == tool
+    if day is not None:
+        today = datetime.now(student_assistant.JAKARTA).date()
+        assert got.date_from == got.date_to == (today + timedelta(days=day)).isoformat()
+
+
+def test_follow_ups_and_open_readings_always_go_to_the_planner():
+    from app import kibo_agent
+
+    turn = {"question": "jadwal besok apa?", "answer": "Matematika jam 7."}
+    for extra in [{"history": [turn]}, {"source": SOURCE}]:
+        payload = student_assistant.StudentAssistantRequest(
+            question="ada pr gak", locale="id", class_id="c", **extra
+        )
+        assert kibo_agent.shortcut(payload) is None
