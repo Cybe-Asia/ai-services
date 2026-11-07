@@ -515,6 +515,52 @@ CASES = json.loads(r"""[
   {
    "date_from": 2
   }
+ ],
+ [
+  "kenapa nilai PTS matematika aku jelek?",
+  "review"
+ ],
+ [
+  "soal mana aja yang salah di kuis bab 1?",
+  "review"
+ ],
+ [
+  "kenapa aku cuma dapet 60 di kuis IPA kemarin",
+  "review"
+ ],
+ [
+  "kalau gitu aku harus belajar apa?",
+  "review",
+  {
+   "history": [
+    [
+     "kenapa nilai PTS matematika aku jelek?",
+     "Di PTS Bilangan Bulat dan Pecahan kamu dapat 40%. Nomor 1 dan 3 salah tanda."
+    ]
+   ]
+  }
+ ],
+ [
+  "jelasin soal nomor 3 dong",
+  "review",
+  {
+   "history": [
+    [
+     "kenapa nilai PTS matematika aku jelek?",
+     "Di PTS Bilangan Bulat dan Pecahan kamu dapat 40%. Nomor 1 dan 3 salah tanda."
+    ]
+   ],
+   "standalone": [
+    "3"
+   ]
+  }
+ ],
+ [
+  "why did I get a bad score on the math test?",
+  "review",
+  {
+   "lang": "en"
+  }
  ]
 ]""")
 

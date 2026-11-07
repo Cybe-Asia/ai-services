@@ -903,6 +903,7 @@ class FakeModel:
     calls: list = []
     plan = "not json"
     written = '{"text": "Ramah: ini jawabannya ya!"}'
+    coached = '{"text": "Nomor 1 tertukar tanda.", "chapters": [2, 9]}'
 
     def __init__(self, settings):
         pass
@@ -913,6 +914,8 @@ class FakeModel:
             return FakeModel.plan
         if kwargs["system_prompt"].startswith("KIBO_WRITER"):
             return FakeModel.written
+        if kwargs["system_prompt"].startswith("KIBO_COACH"):
+            return FakeModel.coached
         return '{"answered": true, "text": "Integral adalah kebalikan turunan."}'
 
 
@@ -921,6 +924,7 @@ def model(monkeypatch):
     FakeModel.calls = []
     FakeModel.plan = "not json"
     FakeModel.written = '{"text": "Ramah: ini jawabannya ya!"}'
+    FakeModel.coached = '{"text": "Nomor 1 tertukar tanda.", "chapters": [2, 9]}'
     monkeypatch.setattr(student_assistant, "LlmClient", FakeModel)
     return FakeModel
 
@@ -1408,3 +1412,89 @@ def test_quizzes_on_the_asked_day_come_first_and_are_named(api, monkeypatch, age
     body = ask(api, "sabtu ada ulangan gak?").json()["reply"]
     assert [row[0] for row in body["table"]["rows"]] == ["E", "A"]
     assert body["text"].startswith("1 kuis/ujian dibuka atau ditutup pada Sabtu, 7 Nov.")
+
+
+def released_paper(scores=(0, 1, 0)):
+    """One released PTS of Math 7 (2 chapters) whose three questions scored `scores`."""
+    text = lambda v: {"en": v, "id": v}  # noqa: E731
+    questions = [
+        {
+            "id": "q1",
+            "prompt": text("-3 + 5 = ?"),
+            "points": 1,
+            "options": [{"id": "a", "text": text("-8")}, {"id": "b", "text": text("2")}],
+            "explanation": text("Tambahkan 5 ke -3 di garis bilangan."),
+        },
+        {"id": "q2", "prompt": text("2 > -1?"), "points": 1, "options": []},
+        {"id": "q3", "prompt": text("Pecahan 1/2 = 0,5?"), "points": 1, "options": []},
+    ]
+    responses = [{"option_id": "a"}, {"value": True}, {"value": False}]
+
+    async def data(settings, authorization, path, params=None, **kw):
+        assert params == {"class_id": "class-one"}
+        if path.endswith("/assessments/mine"):
+
+            def item(aid, title, pct, at):
+                definition = {"title": text(title), "chapter_id": "ch1"}
+                attempt = {"id": f"t-{aid}", "submitted_at": at, "result": {"score_pct": pct}}
+                course = {"id": "c1", "title": text("Matematika 7")}
+                return {
+                    "course": course,
+                    "assessment": {"id": aid, "definition": definition},
+                    "attempt": attempt,
+                }
+
+            return {
+                "items": [
+                    item("pts", "PTS Bilangan", 33.3, 2),
+                    item("k1", "Kuis Bab 1", 90, 1),
+                    {"course": {}, "assessment": {}, "attempt": None},
+                ]
+            }
+        if path.endswith("/attempts/t-pts"):
+            assert path == "/api/v1/learning/assessments/courses/c1/items/pts/attempts/t-pts"
+            answers = [
+                {"question_id": q["id"], "response": r, "score": sc, "feedback": "Cek tandanya"}
+                for q, r, sc in zip(questions, responses, scores)
+            ]
+            return {"questions": questions, "answers": answers}
+        assert path == "/api/v1/learning/curriculum/courses/c1"
+        return {
+            "chapters": [
+                {"id": "ch1", "title": text("Bilangan Bulat")},
+                {"id": "ch2", "title": text("Pecahan")},
+            ]
+        }
+
+    return data
+
+
+def test_review_explains_the_missed_questions_from_the_released_paper(api, monkeypatch, agent):
+    agent.plan = plan(tool="review", topic="nilai pts matematika")
+    monkeypatch.setattr(student_assistant, "learning_data", released_paper())
+    body = ask(api, "kenapa nilai PTS matematika aku jelek?").json()["reply"]
+    assert body["text"] == "Nomor 1 tertukar tanda."
+    assert body["table"]["rows"] == [
+        ["1", "-3 + 5 = ?", "-8", "0/1"],
+        ["3", "Pecahan 1/2 = 0,5?", "Salah", "0/1"],
+    ]
+    # The coach's chapter 9 does not exist; buttons open chapter 2 and the paper.
+    assert [a["label"] for a in body["actions"]] == [
+        "Matematika 7 · Bab 2 · Pecahan",
+        "PTS Bilangan",
+    ]
+    coach = agent.calls[-1]["user_message"]
+    assert (
+        "Tambahkan 5 ke -3" in coach and "Cek tandanya" in coach and '"your_answer": "-8"' in coach
+    )
+
+
+def test_review_keeps_scores_the_teacher_has_not_opened(api, monkeypatch, agent):
+    agent.plan = plan(tool="review")
+    monkeypatch.setattr(
+        student_assistant, "learning_data", released_paper(scores=(None, None, None))
+    )
+    body = ask(api, "kenapa nilaiku jelek?").json()["reply"]
+    assert body["text"] == "Skor per soal untuk PTS Bilangan belum dibuka gurumu."
+    assert "table" not in body
+    assert not any(c["system_prompt"].startswith("KIBO_COACH") for c in agent.calls)
