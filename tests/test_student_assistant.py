@@ -904,6 +904,8 @@ class FakeModel:
     plan = "not json"
     written = '{"text": "Ramah: ini jawabannya ya!"}'
     coached = '{"text": "Nomor 1 tertukar tanda.", "chapters": [2, 9]}'
+    practice = '{"text": "Apa kebalikan dari turunan?"}'
+    checked = '{"text": "Betul! Integral adalah kebalikan turunan.", "verdict": "correct"}'
 
     def __init__(self, settings):
         pass
@@ -916,6 +918,10 @@ class FakeModel:
             return FakeModel.written
         if kwargs["system_prompt"].startswith("KIBO_COACH"):
             return FakeModel.coached
+        if kwargs["system_prompt"].startswith("KIBO_PRACTICE"):
+            return FakeModel.practice
+        if kwargs["system_prompt"].startswith("KIBO_CHECK"):
+            return FakeModel.checked
         return '{"answered": true, "text": "Integral adalah kebalikan turunan."}'
 
     async def stream_complete(self, **kwargs):
@@ -1647,3 +1653,37 @@ def test_follow_ups_and_open_readings_always_go_to_the_planner():
             question="ada pr gak", locale="id", class_id="c", **extra
         )
         assert kibo_agent.shortcut(payload) is None
+
+
+def test_practice_asks_one_question_of_kibos_own_from_the_matching_reading(api, monkeypatch, agent):
+    agent.plan = plan(tool="practice", topic="integral")
+    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
+    body = ask(api, "kasih contoh soal integral dong").json()["reply"]
+    assert (
+        body["text"] == "Apa kebalikan dari turunan?\n\nTulis jawabanmu di sini, nanti Kibo cek ya."
+    )
+    assert body["source"] == "Antiturunan"
+    assert body["actions"][0]["lesson_id"] == "l2"
+    made = [c for c in agent.calls if c["system_prompt"].startswith("KIBO_PRACTICE")][0]
+    assert "Kebalikan turunan." in made["user_message"] and "integral" in made["user_message"]
+
+
+def test_check_judges_the_answer_against_the_question_kibo_asked(api, monkeypatch, agent):
+    agent.plan = plan(tool="check", topic="integral", question="Jawabanku untuk soal integral")
+    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
+    asked = "Apa kebalikan dari turunan?\n\nTulis jawabanmu di sini, nanti Kibo cek ya."
+    history = [{"question": "kasih contoh soal integral", "answer": asked}]
+    body = ask_with_history(api, "integral", history).json()["reply"]
+    assert body["text"] == "Betul! Integral adalah kebalikan turunan."
+    judged = [c for c in agent.calls if c["system_prompt"].startswith("KIBO_CHECK")][0]
+    # The Student's own answer, not the planner's rewrite, next to Kibo's question.
+    assert "ANSWER:\nintegral\n" in judged["user_message"]
+    assert "QUESTION:\nApa kebalikan dari turunan?" in judged["user_message"]
+
+
+def test_practice_without_a_reading_on_the_topic_never_asks_the_model(api, monkeypatch, agent):
+    agent.plan = plan(tool="practice", topic="fotosintesis")
+    monkeypatch.setattr(student_assistant, "learning_data", school_with_integral())
+    body = ask(api, "tes aku soal fotosintesis").json()["reply"]
+    assert "fotosintesis" in body["text"]
+    assert not [c for c in agent.calls if c["system_prompt"].startswith("KIBO_PRACTICE")]

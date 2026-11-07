@@ -569,6 +569,85 @@ CASES = json.loads(r"""[
  [
   "nilaiku kok kecil banget sih",
   "review"
+ ],
+ [
+  "coba kasih 1 contoh soal simple saya yg jawab , kamu yg nilai benar apa tidaknya",
+  "practice",
+  {
+   "history": [
+    [
+     "Coba kasih penjelasan deh sedikit tentang garis bilangan , 2 kalimat aja",
+     "Pada garis bilangan, nol di tengah; positif di kanan nol, negatif di kiri."
+    ]
+   ],
+   "standalone": [
+    "garis bilangan"
+   ]
+  }
+ ],
+ [
+  "kasih contoh soal pecahan dong",
+  "practice"
+ ],
+ [
+  "tes aku soal bilangan bulat",
+  "practice"
+ ],
+ [
+  "give me a practice question about ratios",
+  "practice",
+  {
+   "lang": "en"
+  }
+ ],
+ [
+  "-3",
+  "check",
+  {
+   "history": [
+    [
+     "kasih contoh soal garis bilangan",
+     "Bilangan apa yang 3 langkah di kiri nol? Tulis jawabanmu, nanti Kibo cek ya."
+    ]
+   ]
+  }
+ ],
+ [
+  "minus tiga kan?",
+  "check",
+  {
+   "history": [
+    [
+     "kasih contoh soal garis bilangan",
+     "Bilangan apa yang 3 langkah di kiri nol? Tulis jawabanmu, nanti Kibo cek ya."
+    ]
+   ]
+  }
+ ],
+ [
+  "aku gak tau",
+  "check",
+  {
+   "history": [
+    [
+     "kasih contoh soal garis bilangan",
+     "Bilangan apa yang 3 langkah di kiri nol? Tulis jawabanmu, nanti Kibo cek ya."
+    ]
+   ]
+  }
+ ],
+ [
+  "jadwal besok apa?",
+  "schedule",
+  {
+   "history": [
+    [
+     "kasih contoh soal garis bilangan",
+     "Bilangan apa yang 3 langkah di kiri nol? Tulis jawabanmu, nanti Kibo cek ya."
+    ]
+   ],
+   "date_from": 1
+  }
  ]
 ]""")
 
