@@ -213,7 +213,16 @@ def test_the_class_reads_aggregates_only(setup):
                 "first_tries": 18,
                 "first_try_passed": 6,
                 "most_by_one": 5,
-            }
+            },
+            {
+                "title": T("Science method quiz"),
+                "students": 1,
+                "attempts": 1,
+                "retries": 0,
+                "first_tries": 0,
+                "first_try_passed": 0,
+                "most_by_one": 1,
+            },
         ],
     }
     setup["reply"] = json.dumps(
@@ -226,6 +235,9 @@ def test_the_class_reads_aggregates_only(setup):
     assert r.status_code == 200, r.text
     prompt = setup["prompts"][0]["system_prompt"]
     assert "Aisha" not in prompt and "STU-1" not in prompt and '"behind": 1' in prompt
+    # A quiz with no scored first try has no pass rate, so it cannot read as failed.
+    assert '"scored_first_tries": 0, "passed_first_try": null' in prompt
+    assert '"scored_first_tries": 18, "passed_first_try": 6' in prompt
     assert r.json()["findings"][0]["evidence"] == [{"id": "f4", "tab": "quizzes"}]
 
 
