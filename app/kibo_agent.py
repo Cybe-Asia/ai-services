@@ -121,9 +121,10 @@ def planner_prompt(today: date, reading_open: bool) -> str:
         "progress (how far they are in each module, where to continue); "
         "games (games, XP, trophies or badges they earned); "
         "improve (weak areas overall, what to study more in general); "
-        "review (one released quiz/test result: why they got that score, which questions were "
-        "wrong, a question number in it, or what to study after it; topic = the quiz or "
-        "subject words, empty when they name none); "
+        "review (why a score or nilai is low or bad, even when no quiz is named, which "
+        "questions were wrong, a question number in a result, or what to study after a "
+        "result; how their scores are overall is grades; topic = the quiz or subject words, "
+        "empty when they name none); "
         "extracurricular (clubs/ekskul they joined or can join, and club practice times); "
         "search (find learning material on a topic, or which chapter/module a topic is in, "
         "e.g. 'di bab berapa', 'ada di mana'; topic = the subject words only); "
@@ -774,7 +775,7 @@ async def review(
             authorization,
             f"/api/v1/learning/assessments/courses/{course_id}/items/{assessment_id}"
             f"/attempts/{attempt_id}",
-            params,
+            None,  # class_id here means a teacher acting for a class; Learning refuses a Student
         ),
         sa.learning_data(
             settings, authorization, f"/api/v1/learning/curriculum/courses/{course_id}", params

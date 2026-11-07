@@ -1431,7 +1431,8 @@ def released_paper(scores=(0, 1, 0)):
     responses = [{"option_id": "a"}, {"value": True}, {"value": False}]
 
     async def data(settings, authorization, path, params=None, **kw):
-        assert params == {"class_id": "class-one"}
+        # Learning refuses a Student's attempt read that names a class (teacher acting).
+        assert params == (None if "/attempts/" in path else {"class_id": "class-one"})
         if path.endswith("/assessments/mine"):
 
             def item(aid, title, pct, at):

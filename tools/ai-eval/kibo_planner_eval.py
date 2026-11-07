@@ -561,6 +561,14 @@ CASES = json.loads(r"""[
   {
    "lang": "en"
   }
+ ],
+ [
+  "kenapa nilai aku jelek?",
+  "review"
+ ],
+ [
+  "nilaiku kok kecil banget sih",
+  "review"
  ]
 ]""")
 
