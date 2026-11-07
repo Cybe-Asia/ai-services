@@ -1462,8 +1462,15 @@ def released_paper(scores=(0, 1, 0)):
         assert path == "/api/v1/learning/curriculum/courses/c1"
         return {
             "chapters": [
-                {"id": "ch1", "title": text("Bilangan Bulat")},
-                {"id": "ch2", "title": text("Pecahan")},
+                {"id": "ch1", "title": text("Bilangan Bulat"), "lessons": []},
+                {
+                    "id": "ch2",
+                    "title": text("Pecahan"),
+                    "lessons": [
+                        {"id": "l21", "title": text("Pecahan Senilai")},
+                        {"id": "l22", "title": text("Desimal")},
+                    ],
+                },
             ]
         }
 
@@ -1479,10 +1486,17 @@ def test_review_explains_the_missed_questions_from_the_released_paper(api, monke
         ["1", "-3 + 5 = ?", "-8", "0/1"],
         ["3", "Pecahan 1/2 = 0,5?", "Salah", "0/1"],
     ]
-    # The coach's chapter 9 does not exist; buttons open chapter 2 and the paper.
-    assert [a["label"] for a in body["actions"]] == [
-        "Matematika 7 · Bab 2 · Pecahan",
-        "PTS Bilangan",
+    # The coach's chapter 9 does not exist; buttons open chapter 2 and the result at question 1.
+    assert body["actions"] == [
+        {"label": "Matematika 7 · Bab 2 · Pecahan", "course_id": "c1", "chapter_id": "ch2"},
+        {
+            "label": "Lihat soal nomor 1 · PTS Bilangan",
+            "kind": "quiz",
+            "course_id": "c1",
+            "assessment_id": "pts",
+            "attempt_id": "t-pts",
+            "question": 1,
+        },
     ]
     coach = agent.calls[-1]["user_message"]
     assert (
@@ -1498,4 +1512,16 @@ def test_review_keeps_scores_the_teacher_has_not_opened(api, monkeypatch, agent)
     body = ask(api, "kenapa nilaiku jelek?").json()["reply"]
     assert body["text"] == "Skor per soal untuk PTS Bilangan belum dibuka gurumu."
     assert "table" not in body
+    assert body["actions"][0]["attempt_id"] == "t-pts" and "question" not in body["actions"][0]
     assert not any(c["system_prompt"].startswith("KIBO_COACH") for c in agent.calls)
+
+
+def test_review_opens_the_reading_the_coach_names(api, monkeypatch, agent):
+    agent.plan = plan(tool="review")
+    FakeModel.coached = '{"text": "Ulang desimal.", "readings": ["2.2", "1.5"], "chapters": [2]}'
+    monkeypatch.setattr(student_assistant, "learning_data", released_paper())
+    body = ask(api, "aku harus belajar apa?").json()["reply"]
+    # 1.5 does not exist; chapter 2 already has its reading, so it gets no second button.
+    assert [a.get("lesson_id") for a in body["actions"]] == ["l22", None]
+    assert body["actions"][0]["label"] == "Matematika 7 · Bab 2 · Desimal"
+    assert '"number": "2.1", "title": "Pecahan Senilai"' in agent.calls[-1]["user_message"]

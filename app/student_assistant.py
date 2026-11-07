@@ -138,15 +138,23 @@ def assignment_action(label: str, assignment: object) -> Optional[dict]:
     return {"label": short(label, 80), "kind": "assignment", "assignment_id": assignment}
 
 
-def quiz_action(label: str, course: object, assessment: object) -> Optional[dict]:
-    if not _ids(course, assessment):
+def quiz_action(
+    label: str, course: object, assessment: object, attempt: object = None, question: int = 0
+) -> Optional[dict]:
+    """Opens the quiz; with `attempt`, that result, scrolled to `question` (1-based) when set."""
+    if not _ids(course, assessment) or (attempt is not None and not _ids(attempt)):
         return None
-    return {
+    action = {
         "label": short(label, 80),
         "kind": "quiz",
         "course_id": course,
         "assessment_id": assessment,
     }
+    if attempt is not None:
+        action["attempt_id"] = attempt
+        if 1 <= question <= 200:
+            action["question"] = question
+    return action
 
 
 def short(value: str, limit: int = 140) -> str:
