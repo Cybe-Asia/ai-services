@@ -48,7 +48,8 @@ class ConclusionRequest(BaseModel):
     class_id: Optional[str] = Field(default=None, pattern=ID_PATTERN)
     # Absent: the class conclusion.
     student: Optional[str] = Field(default=None, pattern=ID_PATTERN)
-    days: Literal[7, 30, 90] = 7
+    # The last N days, or the current school semester.
+    days: Literal[7, 30, 90, "semester"] = 7
     locale: Literal["en", "id"] = "id"
 
 

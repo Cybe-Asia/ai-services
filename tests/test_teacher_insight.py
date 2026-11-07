@@ -246,3 +246,14 @@ def test_a_broken_answer_is_503_and_a_missing_session_401(setup):
     assert post(REQ).status_code == 503
     assert post(REQ, token="").status_code == 401
     assert post({**REQ, "days": 14}).status_code == 422
+
+
+def test_the_semester_period_is_passed_to_learning(setup):
+    setup["reply"] = json.dumps(
+        {
+            "findings": [{"kind": "retry", "title": "t", "body": "b", "evidence": ["f3"]}],
+            "next_step": "n",
+        }
+    )
+    assert post({**REQ, "days": "semester"}).status_code == 200
+    assert setup["reads"][0][1]["days"] == "semester"
