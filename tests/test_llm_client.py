@@ -85,3 +85,68 @@ def test_every_feature_block_carries_its_own_data_tier():
         for other in FEATURE_PROVIDERS:
             if other != feature:
                 assert "x-ai-data-tier" not in _provider_headers(settings.for_feature(other))
+
+
+def openai_stream(monkeypatch, events: str):
+    import asyncio
+
+    import httpx
+
+    from app import llm_client
+    from app.config import Settings
+
+    real = httpx.AsyncClient
+    sent = []
+
+    def handler(request):
+        import json
+
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, text=events)
+
+    monkeypatch.setattr(
+        llm_client.httpx,
+        "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    )
+    client = llm_client.LlmClient(
+        Settings(
+            _env_file=None,
+            ai_provider_base_url="http://gateway/v1",
+            ai_provider_protocol="openai",
+            ai_model="digital-school-chat",
+        )
+    )
+
+    async def run():
+        return [
+            chunk
+            async for chunk in client.stream_complete(
+                system_prompt="s", user_message="u", require_complete=True
+            )
+        ]
+
+    return asyncio.run(run()), sent
+
+
+def test_openai_stream_yields_deltas_and_sends_reasoning_model_fields(monkeypatch) -> None:
+    chunks, sent = openai_stream(
+        monkeypatch,
+        'data: {"choices":[{"delta":{"content":"Ha"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":1}}\n\ndata: [DONE]\n\n',
+    )
+
+    assert chunks == ["Ha", "lo"]
+    assert sent[0]["stream"] is True and "max_completion_tokens" in sent[0]
+    assert "temperature" not in sent[0]
+
+
+def test_openai_stream_that_is_cut_off_raises_when_completeness_is_required(monkeypatch) -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        openai_stream(
+            monkeypatch,
+            'data: {"choices":[{"delta":{"content":"Ha"},"finish_reason":"length"}]}\n\n',
+        )

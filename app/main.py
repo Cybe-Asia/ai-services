@@ -435,10 +435,48 @@ async def student_assistant(
         payload = StudentAssistantRequest.model_validate_json(bytes(body))
     except ValidationError as exc:
         raise HTTPException(422, "Invalid Student question") from exc
+    if "text/event-stream" in request.headers.get("accept", ""):
+        return StreamingResponse(
+            _stream_student_answer(settings, authorization, payload),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
+        )
     result = await answer_student(settings, authorization, payload)
     return Response(
         json.dumps(result), media_type="application/json", headers={"Cache-Control": "no-store"}
     )
+
+
+async def _stream_student_answer(
+    settings: Settings, authorization: Optional[str], payload: StudentAssistantRequest
+) -> AsyncIterator[str]:
+    """Kibo's reply text as the model writes it ("text" events), then the same checked reply the
+    JSON endpoint returns ("reply"), or an "error" with the status it would answer. The reply
+    text replaces the streamed text, which is only a preview."""
+    from app import kibo_agent
+
+    queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+    token = kibo_agent.TEXT_SINK.set(queue.put_nowait)
+    try:
+        task = asyncio.create_task(answer_student(settings, authorization, payload))
+    finally:
+        kibo_agent.TEXT_SINK.reset(token)
+    task.add_done_callback(lambda _: queue.put_nowait(None))
+    try:
+        while (delta := await queue.get()) is not None:
+            yield _sse_event("text", {"delta": delta})
+        try:
+            result = task.result()
+        except HTTPException as exc:
+            status_code = exc.status_code if exc.status_code in {400, 401, 403, 422} else 503
+        except Exception:
+            status_code = 503
+        else:
+            yield _sse_event("reply", result)
+            return
+        yield _sse_event("error", {"status": status_code})
+    finally:
+        task.cancel()
 
 
 @app.post("/api/ai/v1/teacher/essay-review")

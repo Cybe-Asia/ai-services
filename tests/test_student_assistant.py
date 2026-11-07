@@ -918,6 +918,11 @@ class FakeModel:
             return FakeModel.coached
         return '{"answered": true, "text": "Integral adalah kebalikan turunan."}'
 
+    async def stream_complete(self, **kwargs):
+        answer = await self.complete(**kwargs)
+        for at in range(0, len(answer), 5):
+            yield answer[at : at + 5]
+
 
 @pytest.fixture
 def model(monkeypatch):
@@ -1525,3 +1530,70 @@ def test_review_opens_the_reading_the_coach_names(api, monkeypatch, agent):
     assert [a.get("lesson_id") for a in body["actions"]] == ["l22", None]
     assert body["actions"][0]["label"] == "Matematika 7 · Bab 2 · Desimal"
     assert '"number": "2.1", "title": "Pecahan Senilai"' in agent.calls[-1]["user_message"]
+
+
+def stream(api, question):
+    """The SSE events of one streamed question as (event, data) pairs."""
+    import json as _json
+
+    response = api.post(
+        "/api/ai/v1/student/assistant",
+        json={**PAYLOAD, "question": question, "locale": "id"},
+        headers={"Authorization": "Bearer valid-student", "Accept": "text/event-stream"},
+    )
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-accel-buffering"] == "no"
+    events = []
+    for block in response.text.strip().split("\n\n"):
+        name, data = block.split("\n")
+        events.append((name.removeprefix("event: "), _json.loads(data.removeprefix("data: "))))
+    return events
+
+
+def test_streamed_answer_sends_the_writer_text_as_it_arrives_then_the_checked_reply(
+    api, monkeypatch, agent
+):
+    agent.plan = plan(tool="homework")
+    agent.written = '{"text": "Kamu \\"hebat\\" \\ud83d\\ude0a, tinggal 1 PR."}'
+
+    async def data(settings, authorization, path, params=None, **kw):
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    events = stream(api, "ada pr gak")
+    *texts, (last, reply) = events
+    assert {name for name, _ in texts} == {"text"} and len(texts) > 3
+    assert "".join(t["delta"] for _, t in texts) == 'Kamu "hebat" \U0001f60a, tinggal 1 PR.'
+    assert last == "reply" and reply["contractVersion"] == 1
+    assert reply["reply"]["text"] == 'Kamu "hebat" \U0001f60a, tinggal 1 PR.'
+
+
+def test_streamed_writer_failure_ends_with_the_reads_own_text(api, monkeypatch, agent):
+    agent.plan = plan(tool="homework")
+    agent.written = '{"text": "Setengah jawa'
+
+    async def data(settings, authorization, path, params=None, **kw):
+        return {"items": [], "next": None}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    name, reply = stream(api, "ada pr gak")[-1]
+    assert name == "reply"
+    assert reply["reply"]["text"] == "Tidak ada tugas terbuka pada halaman ini."
+
+
+def test_streamed_question_that_loses_access_ends_with_the_same_status(api, monkeypatch):
+    async def denied(*args, **kwargs):
+        raise HTTPException(403, "Student access changed")
+
+    monkeypatch.setattr(main, "answer_student", denied)
+    assert stream(api, "ada pr gak") == [("error", {"status": 403})]
+
+
+def test_json_text_decodes_split_escapes_and_waits_for_the_text_key():
+    from app.kibo_agent import JsonText
+
+    raw = '{"chapters": [1], "text": "A\\nB \\u00e9 \\ud83d\\ude00 \\"q\\"", "readings": []}'
+    text = JsonText()
+    assert "".join(text.feed(raw[at : at + 3]) for at in range(0, len(raw), 3)) == (
+        'A\nB \u00e9 \U0001f600 "q"'
+    )

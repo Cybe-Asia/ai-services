@@ -94,6 +94,7 @@ class LlmClient:
         timeout_seconds: Optional[float] = None,
         response_format: Optional[dict[str, str]] = None,
         feature: str = "unknown",
+        require_complete: bool = False,
     ) -> AsyncIterator[str]:
         started = time.monotonic()
         outcome = "error"
@@ -106,6 +107,7 @@ class LlmClient:
                 max_tokens,
                 timeout_seconds,
                 response_format,
+                require_complete,
             ):
                 produced = True
                 yield chunk
@@ -455,6 +457,7 @@ class LlmClient:
         max_tokens: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         response_format: Optional[dict[str, str]] = None,
+        require_complete: bool = False,
     ) -> AsyncIterator[str]:
         if self._settings.ai_provider_base_url is None:
             return
@@ -462,6 +465,19 @@ class LlmClient:
         _validate_provider_messages(self._settings, system_prompt, user_message)
         base_url = str(self._settings.ai_provider_base_url).rstrip("/")
         headers = _provider_headers(self._settings)
+        if self._settings.ai_provider_protocol == "openai":
+            async for chunk in self._stream_openai(
+                base_url,
+                headers,
+                system_prompt,
+                user_message,
+                max_tokens,
+                timeout_seconds,
+                response_format,
+                require_complete,
+            ):
+                yield chunk
+            return
         native_base_url = _ollama_native_base_url(
             self._settings.ai_model, base_url, self._settings.ai_provider_protocol
         )
@@ -535,6 +551,61 @@ class LlmClient:
                 cleaned = thinking_filter.flush()
                 if cleaned:
                     yield cleaned
+
+    async def _stream_openai(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        system_prompt: str,
+        user_message: str,
+        max_tokens: Optional[int],
+        timeout_seconds: Optional[float],
+        response_format: Optional[dict[str, str]],
+        require_complete: bool,
+    ) -> AsyncIterator[str]:
+        """The streamed twin of `_complete_openai`. With require_complete, a stream that does not
+        end with finish_reason `stop` raises after its last chunk, so callers drop what they got."""
+        payload: dict = {
+            "model": self._settings.ai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "max_completion_tokens": max_tokens or self._settings.ai_max_tokens,
+            "stream": True,
+        }
+        if self._settings.ai_reasoning_effort is not None:
+            payload["reasoning_effort"] = self._settings.ai_reasoning_effort
+        if response_format is not None:
+            payload["response_format"] = response_format
+        finish = None
+        timeout = timeout_seconds or self._settings.request_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST", f"{base_url}/chat/completions", json=payload, headers=headers
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    raw = line.removeprefix("data:").strip() if line.startswith("data:") else ""
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        body = json.loads(raw) if raw else None
+                    except json.JSONDecodeError:
+                        continue
+                    choices = body.get("choices") if isinstance(body, dict) else None
+                    if (
+                        not isinstance(choices, list)
+                        or not choices
+                        or not isinstance(choices[0], dict)
+                    ):
+                        continue
+                    finish = choices[0].get("finish_reason") or finish
+                    content = (choices[0].get("delta") or {}).get("content")
+                    if isinstance(content, str) and content:
+                        yield content
+        if require_complete and finish != "stop":
+            raise ValueError("unfinished answer")
 
     async def _stream_ollama_native(
         self,

@@ -5,8 +5,10 @@ chooses the read and the wording. Any model failure falls back to the keyword ro
 
 import asyncio
 import json
+import re
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -191,14 +193,75 @@ def _assistant(settings: Settings, model: Optional[str] = None) -> Optional[Sett
     return scoped.model_copy(update={"ai_model": model}) if model else scoped
 
 
-async def _complete_json(scoped: Settings, system: str, user: str) -> str:
-    answer = await sa.LlmClient(scoped).complete(
-        system_prompt=system,
-        user_message=user,
-        response_format={"type": "json_object"},
-        require_complete=True,
-        feature="assistant",
-    )
+# Set by the streaming endpoint: receives the reply text as the writer or coach model writes it.
+TEXT_SINK: ContextVar[Optional[Callable[[str], None]]] = ContextVar("kibo_text_sink", default=None)
+_TEXT_KEY = re.compile(r'"text"\s*:\s*"')
+
+
+class JsonText:
+    """Decodes the "text" string of a JSON object while the object is still arriving."""
+
+    def __init__(self) -> None:
+        self.raw, self.at, self.done = "", -1, False
+
+    def feed(self, chunk: str) -> str:
+        self.raw += chunk
+        if self.at < 0:
+            key = _TEXT_KEY.search(self.raw)
+            if key is None:
+                return ""
+            self.at = key.end()
+        out = []
+        while not self.done and self.at < len(self.raw):
+            char = self.raw[self.at]
+            if char == '"':
+                self.done = True
+            elif char != "\\":
+                out.append(char)
+                self.at += 1
+            else:
+                size = 6 if self.raw[self.at + 1 : self.at + 2] == "u" else 2
+                if size == 6 and self.raw[self.at + 2 : self.at + 4].lower() in {
+                    "d8",
+                    "d9",
+                    "da",
+                    "db",
+                }:
+                    size = 12  # a surrogate pair (emoji) decodes as one character
+                if len(self.raw) - self.at < size:
+                    break
+                out.append(json.loads(f'"{self.raw[self.at : self.at + size]}"'))
+                self.at += size
+        return "".join(out)
+
+
+async def _complete_json(scoped: Settings, system: str, user: str, stream: bool = False) -> str:
+    sink = TEXT_SINK.get() if stream else None
+    client = sa.LlmClient(scoped)
+    if sink is None:
+        answer = await client.complete(
+            system_prompt=system,
+            user_message=user,
+            response_format={"type": "json_object"},
+            require_complete=True,
+            feature="assistant",
+        )
+    else:
+        parts, text, size = [], JsonText(), 0
+        async for chunk in client.stream_complete(
+            system_prompt=system,
+            user_message=user,
+            response_format={"type": "json_object"},
+            require_complete=True,
+            feature="assistant",
+        ):
+            size += len(chunk)
+            if size > 8192:
+                raise ValueError("no answer")
+            parts.append(chunk)
+            if piece := text.feed(chunk):
+                sink(piece)
+        answer = "".join(parts)
     if not isinstance(answer, str) or len(answer.encode()) > 8192:
         raise ValueError("no answer")
     return answer
@@ -265,6 +328,7 @@ async def write(
             writer_prompt(payload.locale),
             f"Student question:\n{payload.question}\n\nDATA:\n"
             + json.dumps(facts, ensure_ascii=False),
+            stream=True,
         )
         body["text"] = Written.model_validate_json(answer).text.strip()
         registry.count("assistant", "written")
@@ -894,6 +958,7 @@ async def review(
                     coach_prompt(payload.locale),
                     f"Student question:\n{payload.question}\n\nDATA:\n"
                     + json.dumps(facts, ensure_ascii=False),
+                    stream=True,
                 )
             )
             text = coached.text.strip()
