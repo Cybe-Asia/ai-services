@@ -811,8 +811,9 @@ def catalogue_data(paths):
             return {"items": [{"id": "course-one"}], "next": None}
         if path.endswith("/search"):
             # Only the text of "Integral tentu" mentions Riemann sums.
-            hit = {"chapter_id": "ch-int", "lesson_id": "l3"}
-            return {"items": [hit] if params["q"] == "jumlah riemann" else []}
+            hit = {"chapter_id": "ch-int", "lesson_id": "l3", "matches": 1}
+            more = {"chapter_id": "ch-int", "lesson_id": "l2", "matches": 4}
+            return {"items": [hit, more] if params["q"] == "jumlah riemann" else []}
         return CATALOGUE_COURSE
 
     return data
@@ -842,8 +843,15 @@ def test_search_falls_back_to_the_text_of_the_readings(api, monkeypatch):
     paths = []
     monkeypatch.setattr(student_assistant, "learning_data", catalogue_data(paths))
     body = ask(api, "cari materi jumlah riemann").json()["reply"]
-    assert body["table"]["rows"] == [["Matematika 11", "Bab 2 · Integral", "Integral tentu"]]
-    assert body["actions"][0]["lesson_id"] == "l3"
+    # The reading that mentions the topic most comes first; buttons name the reading.
+    assert body["table"]["rows"] == [
+        ["Matematika 11", "Bab 2 · Integral", "Antiturunan"],
+        ["Matematika 11", "Bab 2 · Integral", "Integral tentu"],
+    ]
+    assert [a["label"] for a in body["actions"]] == [
+        "Matematika 11 · Bab 2 · Antiturunan",
+        "Matematika 11 · Bab 2 · Integral tentu",
+    ]
     assert (
         "/api/v1/learning/curriculum/courses/course-one/search",
         {"q": "jumlah riemann", "class_id": "class-one"},

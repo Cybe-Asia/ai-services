@@ -857,6 +857,7 @@ async def find_lessons(
             for course_id in ids
         )
     )
+    ranked = []
     for course_id, course, match in zip(ids, courses, matches):
         items = match.get("items")
         if not isinstance(items, list) or len(items) > 20:
@@ -877,8 +878,16 @@ async def find_lessons(
                 )
                 if lesson is not None:
                     found = (lesson["id"], translated(lesson.get("title"), payload.locale))
-                    hits.append(lesson_hit(payload, course_id, module, number, chapter, found))
-    return hits
+                    count = item.get("matches")
+                    ranked.append(
+                        (
+                            count if type(count) is int else 0,
+                            lesson_hit(payload, course_id, module, number, chapter, found, True),
+                        )
+                    )
+    # The reading that talks most about the topic first, across modules.
+    ranked.sort(key=lambda r: r[0], reverse=True)
+    return [hit for _, hit in ranked]
 
 
 def lesson_hit(
@@ -888,15 +897,21 @@ def lesson_hit(
     number: int,
     chapter: dict,
     found: Optional[tuple],
+    by_reading: bool = False,
 ) -> tuple[list[str], Optional[dict]]:
-    """A search table row and its open action; Lessons numbers chapters by their order."""
-    chapter_title = f"{'Bab' if payload.locale == 'id' else 'Ch.'} {number} · " + translated(
-        chapter.get("title"), payload.locale
-    )
+    """A search table row and its open action; Lessons numbers chapters by their order. A
+    text match names the reading on its button, since one chapter can hold several."""
+    number_label = f"{'Bab' if payload.locale == 'id' else 'Ch.'} {number}"
+    chapter_title = f"{number_label} · " + translated(chapter.get("title"), payload.locale)
     lesson_id, lesson_title = found or (None, "–")
+    label = (
+        f"{module} · {number_label} · {lesson_title}"
+        if by_reading
+        else f"{module} · {chapter_title}"
+    )
     return (
         [short(module), short(chapter_title), short(lesson_title)],
-        open_action(f"{module} · {chapter_title}", course_id, chapter.get("id"), lesson_id),
+        open_action(label, course_id, chapter.get("id"), lesson_id),
     )
 
 
