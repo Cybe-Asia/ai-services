@@ -854,8 +854,8 @@ def check_prompt(locale: str) -> str:
 async def _topic_reading(
     settings: Settings, authorization: str, payload: sa.StudentAssistantRequest, topic: str
 ) -> tuple[Optional[sa.StudentAssistantRequest], list[dict]]:
-    """The open reading, else the first of the Student's readings whose title names the topic,
-    with buttons to the matching chapters."""
+    """The open reading, else the first of the Student's readings whose title (or text) names
+    the topic, with buttons to the matching chapters."""
     if payload.source is not None:
         return payload, []
     terms = sa.topic_terms(topic)
@@ -1122,7 +1122,7 @@ async def review(
     # The result itself, scrolled to the first missed question when one was missed.
     first = int(rows[0][0]) if rows else 0
     quiz = sa.quiz_action(
-        (f"Lihat soal nomor {first} · {title}" if id_ else f"See question {first} · {title}")
+        (f"soal nomor {first} · {title}" if id_ else f"question {first} · {title}")
         if first
         else title,
         course_id,

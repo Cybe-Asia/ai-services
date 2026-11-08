@@ -809,6 +809,10 @@ def catalogue_data(paths):
         paths.append((path, params))
         if path == "/api/v1/learning/curriculum/courses":
             return {"items": [{"id": "course-one"}], "next": None}
+        if path.endswith("/search"):
+            # Only the text of "Integral tentu" mentions Riemann sums.
+            hit = {"chapter_id": "ch-int", "lesson_id": "l3"}
+            return {"items": [hit] if params["q"] == "jumlah riemann" else []}
         return CATALOGUE_COURSE
 
     return data
@@ -832,6 +836,18 @@ def test_search_finds_the_chapter_and_opens_it_in_lessons(api, monkeypatch):
     assert all(params == {"class_id": "class-one"} for _, params in paths)
     body = ask(api, "integral tentu materi").json()["reply"]
     assert body["actions"][0]["lesson_id"] == "l3"
+
+
+def test_search_falls_back_to_the_text_of_the_readings(api, monkeypatch):
+    paths = []
+    monkeypatch.setattr(student_assistant, "learning_data", catalogue_data(paths))
+    body = ask(api, "cari materi jumlah riemann").json()["reply"]
+    assert body["table"]["rows"] == [["Matematika 11", "Bab 2 · Integral", "Integral tentu"]]
+    assert body["actions"][0]["lesson_id"] == "l3"
+    assert (
+        "/api/v1/learning/curriculum/courses/course-one/search",
+        {"q": "jumlah riemann", "class_id": "class-one"},
+    ) in paths
 
 
 def test_search_without_a_match_or_topic_is_truthful(api, monkeypatch):
@@ -952,6 +968,8 @@ def school_with_integral():
             return {"items": [{"id": "course-one"}], "next": None}
         if path.endswith("/lessons/l2"):
             return lesson
+        if path.endswith("/search"):
+            return {"items": []}
         return {**CATALOGUE_COURSE, "class_id": "class-one", "publication": "published"}
 
     return data
@@ -1501,7 +1519,7 @@ def test_review_explains_the_missed_questions_from_the_released_paper(api, monke
     assert body["actions"] == [
         {"label": "Matematika 7 · Bab 2 · Pecahan", "course_id": "c1", "chapter_id": "ch2"},
         {
-            "label": "Lihat soal nomor 1 · PTS Bilangan",
+            "label": "soal nomor 1 · PTS Bilangan",
             "kind": "quiz",
             "course_id": "c1",
             "assessment_id": "pts",

@@ -773,7 +773,8 @@ async def find_lessons(
     settings: Settings, authorization: str, payload: StudentAssistantRequest, terms: list[str]
 ) -> list[tuple[list[str], Optional[dict]]]:
     """Chapters and readings of the Student's current modules whose titles contain every
-    term, in either language: a table row and an open action each."""
+    term, in either language, else the readings whose text does: a table row and an open
+    action each."""
     catalogue = await learning_data(
         settings,
         authorization,
@@ -840,20 +841,63 @@ async def find_lessons(
                     found = (lesson.get("id"), translated(title, payload.locale))
                     break
             if found or all(t in chapter_text.casefold() for t in terms):
-                chapter_title = (
-                    f"{'Bab' if payload.locale == 'id' else 'Ch.'} {number} · "
-                    + translated(heading, payload.locale)
-                )
-                lesson_id, lesson_title = found or (None, "–")
-                hits.append(
+                hits.append(lesson_hit(payload, course_id, module, number, chapter, found))
+    if hits or not terms:
+        return hits
+    # No title names the topic: Learning says which readings' text does (published, chapters
+    # the Student may open).
+    matches = await asyncio.gather(
+        *(
+            learning_data(
+                settings,
+                authorization,
+                f"/api/v1/learning/curriculum/courses/{course_id}/search",
+                {"q": " ".join(terms), "class_id": payload.class_id},
+            )
+            for course_id in ids
+        )
+    )
+    for course_id, course, match in zip(ids, courses, matches):
+        items = match.get("items")
+        if not isinstance(items, list) or len(items) > 20:
+            raise HTTPException(503, "Student courses unavailable")
+        module = translated(course.get("title"), payload.locale)
+        for item in items:
+            for number, chapter in enumerate(course["chapters"], 1):
+                lesson = next(
                     (
-                        [short(module), short(chapter_title), short(lesson_title)],
-                        open_action(
-                            f"{module} · {chapter_title}", course_id, chapter.get("id"), lesson_id
-                        ),
-                    )
+                        lesson
+                        for lesson in chapter["lessons"]
+                        if isinstance(item, dict)
+                        and chapter.get("id") == item.get("chapter_id")
+                        and isinstance(lesson, dict)
+                        and lesson.get("id") == item.get("lesson_id")
+                    ),
+                    None,
                 )
+                if lesson is not None:
+                    found = (lesson["id"], translated(lesson.get("title"), payload.locale))
+                    hits.append(lesson_hit(payload, course_id, module, number, chapter, found))
     return hits
+
+
+def lesson_hit(
+    payload: StudentAssistantRequest,
+    course_id: str,
+    module: str,
+    number: int,
+    chapter: dict,
+    found: Optional[tuple],
+) -> tuple[list[str], Optional[dict]]:
+    """A search table row and its open action; Lessons numbers chapters by their order."""
+    chapter_title = f"{'Bab' if payload.locale == 'id' else 'Ch.'} {number} · " + translated(
+        chapter.get("title"), payload.locale
+    )
+    lesson_id, lesson_title = found or (None, "–")
+    return (
+        [short(module), short(chapter_title), short(lesson_title)],
+        open_action(f"{module} · {chapter_title}", course_id, chapter.get("id"), lesson_id),
+    )
 
 
 PERFECT_WORDS = r"(\b100\b|sempurna|perfect|full mark)"
