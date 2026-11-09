@@ -245,10 +245,16 @@ def test_schedule_answers_the_asked_day_grouped_with_school_subject_names():
     assert len(schedule_text(meetings, "Jadwalku?", "id", now)[1]["rows"]) == 3
 
 
-def test_no_matching_reading_never_calls_provider(api, monkeypatch):
+def test_no_matching_reading_sends_the_provider_no_school_data(api, monkeypatch):
+    sent = []
+
     class NoModel:
         def __init__(self, settings):
-            raise AssertionError("No published source matched")
+            pass
+
+        async def complete(self, **kwargs):
+            sent.append(kwargs["user_message"])
+            return '{"answered": false, "text": ""}'
 
     async def data(settings, authorization, path, params=None):
         if path == "/api/v1/learning/curriculum/courses":
@@ -264,6 +270,7 @@ def test_no_matching_reading_never_calls_provider(api, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["reply"]["destinations"] == ["lessons"]
+    assert sent == ["READINGS:\n(none)\n\nQuestion:\nExplain fractions"]
 
 
 def test_concept_passes_only_published_reading_and_rechecks_exact_source(api, monkeypatch):
@@ -823,7 +830,7 @@ def test_search_finds_the_chapter_and_opens_it_in_lessons(api, monkeypatch):
     paths = []
     monkeypatch.setattr(student_assistant, "learning_data", catalogue_data(paths))
     body = ask(api, "cariin dong materi integral").json()["reply"]
-    assert body["text"] == 'Kibo menemukan 1 bab tentang "integral":'
+    assert body["text"] == 'Kibo menemukan 1 materi tentang "integral":'
     # The chapter carries the number Lessons shows ("which chapter is it in?").
     assert body["table"]["rows"] == [["Matematika 11", "Bab 2 · Integral", "Antiturunan"]]
     assert body["actions"] == [
@@ -1010,6 +1017,68 @@ def test_concept_reading_that_does_not_answer_points_to_the_chapter(api, monkeyp
     )
     assert "yang kamu pilih" not in body["text"]
     assert body["actions"][0]["lesson_id"] == "l2"
+
+
+def readings_data():
+    """Two readings of Integral that each mention Riemann sums in passing."""
+    texts = {
+        "l2": "Luas dihampiri jumlah Riemann.",
+        "l3": "Integral tentu adalah limit jumlah Riemann.",
+    }
+    school = catalogue_data([])
+
+    async def data(settings, authorization, path, params=None):
+        lesson = path.rsplit("/lessons/", 1)
+        if len(lesson) == 2:
+            title = {"l2": "Antiturunan", "l3": "Integral tentu"}[lesson[1]]
+            return {
+                "id": lesson[1],
+                "title": {"en": title, "id": title},
+                "blocks": [{"type": "paragraph", "text": {"en": "-", "id": texts[lesson[1]]}}],
+            }
+        if params is None:
+            return {**CATALOGUE_COURSE, "class_id": "class-one", "publication": "published"}
+        return await school(settings, authorization, path, params)
+
+    return data
+
+
+def test_concept_question_combines_every_reading_that_mentions_it(api, monkeypatch, model):
+    monkeypatch.setattr(student_assistant, "learning_data", readings_data())
+    body = ask(api, "apa itu jumlah riemann?").json()["reply"]
+    sent = model.calls[-1]["user_message"]
+    assert "Luas dihampiri jumlah Riemann." in sent and "limit jumlah Riemann." in sent
+    assert body["source"] == "Antiturunan"
+    assert [a["lesson_id"] for a in body["actions"]] == ["l2", "l3"]
+
+
+def test_school_concept_beyond_the_readings_is_labelled_general(api, monkeypatch, model):
+    async def general(self, **kwargs):
+        model.calls.append(kwargs)
+        return '{"answered": true, "general": true, "text": "Luas persegi panjang."}'
+
+    monkeypatch.setattr(model, "complete", general)
+    monkeypatch.setattr(student_assistant, "learning_data", readings_data())
+    body = ask(api, "apa itu jumlah riemann?").json()["reply"]
+    assert body["source"] == "Bacaanmu + pengetahuan umum"
+    assert body["actions"][0]["lesson_id"] == "l2"
+    # No reading mentions it: still a school concept, answered as general knowledge only.
+    body = ask(api, "apa itu fotosintesis?").json()["reply"]
+    assert body["source"] == "Pengetahuan umum"
+    assert "actions" not in body
+    assert "READINGS:\n(none)" in model.calls[-1]["user_message"]
+
+
+def test_question_no_reading_mentions_and_not_a_school_concept_finds_nothing(
+    api, monkeypatch, model
+):
+    async def refused(self, **kwargs):
+        return '{"answered": false, "text": ""}'
+
+    monkeypatch.setattr(model, "complete", refused)
+    monkeypatch.setattr(student_assistant, "learning_data", readings_data())
+    body = ask(api, "apa itu skibidi?").json()["reply"]
+    assert body["text"] == 'Belum ada materi tentang "skibidi" di modul kelasmu.'
 
 
 def results_data(pcts, released=True):
