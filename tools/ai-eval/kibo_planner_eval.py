@@ -214,6 +214,25 @@ CASES = json.loads(r"""[
   "unsupported"
  ],
  [
+  "saya punya catatan dimana aja",
+  "notes"
+ ],
+ [
+  "catatanku waktu live kelas kemarin apa ya?",
+  "notes"
+ ],
+ [
+  "apa isi catatanku soal fotosintesis?",
+  "notes"
+ ],
+ [
+  "where are my notes?",
+  "notes",
+  {
+   "lang": "en"
+  }
+ ],
+ [
   "halo kibo",
   "smalltalk"
  ],

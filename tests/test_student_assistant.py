@@ -1782,3 +1782,68 @@ def test_practice_without_a_reading_on_the_topic_never_asks_the_model(api, monke
     body = ask(api, "tes aku soal fotosintesis").json()["reply"]
     assert "fotosintesis" in body["text"]
     assert not [c for c in agent.calls if c["system_prompt"].startswith("KIBO_PRACTICE")]
+
+
+def test_notes_lists_own_reading_and_meeting_notes_newest_first(api, monkeypatch, agent):
+    agent.plan = plan(tool="notes")
+    agent.written = "not json"
+    day = int(datetime(2026, 11, 9, 3, tzinfo=timezone.utc).timestamp() * 1000)
+
+    async def data(settings, authorization, path, params=None, **kw):
+        if path == "/api/v1/learning/notes/mine":
+            note = {"courseId": "course-one", "lessonId": "l3", "updatedAt": day - 86400000}
+            return {
+                "lessons": [
+                    {**note, "text": "Integral = limit jumlah Riemann"},
+                    {**note, "courseId": "old-course", "text": "lama", "updatedAt": 1},
+                ],
+                "meetings": [
+                    {
+                        "classId": "class-one",
+                        "meetingId": "m1",
+                        "text": "Tanya akar",
+                        "updatedAt": day,
+                    }
+                ],
+            }
+        if path == "/api/v1/learning/class-meetings":
+            return {"items": [{"id": "m1", "title": "Math", "starts_at": day}]}
+        if path.endswith("/old-course"):
+            raise HTTPException(403, "denied")
+        return CATALOGUE_COURSE
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "saya punya catatan dimana aja").json()["reply"]
+    assert body["text"] == (
+        "Kamu punya 2 catatan di bacaan dan 1 catatan di pertemuan kelas. Ini yang terbaru:"
+    )
+    assert body["table"]["rows"] == [
+        ["Kelas Matematika · 9 Nov 2026", "Tanya akar", "9 Nov 2026"],
+        ["Matematika 11 · Bab 2 · Integral tentu", "Integral = limit jumlah Riemann", "8 Nov 2026"],
+        ["Bacaan di modul lain", "lama", "1 Jan 1970"],
+    ]
+    assert body["actions"] == [
+        {
+            "label": "Matematika 11 · Bab 2 · Integral tentu",
+            "course_id": "course-one",
+            "chapter_id": "ch-int",
+            "lesson_id": "l3",
+        }
+    ]
+    # The writer may read the Student's own notes to answer what they say.
+    assert "Tanya akar" in agent.calls[-1]["user_message"]
+
+
+def test_no_notes_says_where_to_write_one(api, monkeypatch, agent):
+    agent.plan = plan(tool="notes")
+    agent.written = "not json"
+    paths = []
+
+    async def data(settings, authorization, path, params=None, **kw):
+        paths.append(path)
+        return {"lessons": [], "meetings": []}
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    body = ask(api, "catatanku mana").json()["reply"]
+    assert body["text"].startswith("Kamu belum punya catatan.")
+    assert paths == ["/api/v1/learning/notes/mine"]

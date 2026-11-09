@@ -66,6 +66,7 @@ class Plan(BaseModel):
         "games",
         "improve",
         "extracurricular",
+        "notes",
         "review",
         "practice",
         "check",
@@ -137,6 +138,8 @@ def planner_prompt(today: date, reading_open: bool) -> str:
         "result; how their scores are overall is grades; topic = the quiz or subject words, "
         "empty when they name none); "
         "extracurricular (clubs/ekskul they joined or can join, and club practice times); "
+        "notes (their own saved notes/catatan on readings or from class meetings and live "
+        "classes: where they have notes, or what their notes say); "
         "search (find learning material on a topic, or which chapter/module a topic is in, "
         "e.g. 'di bab berapa', 'ada di mana'; topic = the subject words only); "
         "explain (explain a school concept, or answer a short school-subject question such "
@@ -775,6 +778,8 @@ async def answer(
             return await sa.improvements(settings, authorization, context, payload)
         if tool == "extracurricular":
             return await extracurricular(settings, authorization, payload)
+        if tool == "notes":
+            return await sa.notes(settings, authorization, payload)
         if tool == "search":
             return await sa.search_lessons(settings, authorization, payload, terms)
         if tool == "smalltalk":

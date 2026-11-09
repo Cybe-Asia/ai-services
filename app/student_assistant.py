@@ -480,6 +480,128 @@ async def schedule(
     )
 
 
+async def lesson_places(
+    settings: Settings, authorization: str, payload: StudentAssistantRequest, course_id: str
+) -> dict[str, tuple[str, object]]:
+    """Each reading of a module as lesson id → ("Modul · Bab N · Bacaan", chapter id); empty
+    for a module the Student can no longer open."""
+    try:
+        course = await learning_data(
+            settings,
+            authorization,
+            f"/api/v1/learning/curriculum/courses/{course_id}",
+            {"class_id": payload.class_id},
+        )
+    except HTTPException as exc:
+        if exc.status_code in {403, 404}:
+            return {}
+        raise
+    chapters = course.get("chapters")
+    if course.get("id") != course_id or not isinstance(chapters, list) or len(chapters) > 50:
+        raise HTTPException(503, "Student course unavailable")
+    module = translated(course.get("title"), payload.locale)
+    word = "Bab" if payload.locale == "id" else "Ch."
+    places = {}
+    # Lessons numbers chapters by their order in the module.
+    for number, chapter in enumerate(chapters, 1):
+        if not isinstance(chapter, dict) or not isinstance(chapter.get("lessons"), list):
+            raise HTTPException(503, "Student course unavailable")
+        for lesson in chapter["lessons"]:
+            if isinstance(lesson, dict) and isinstance(lesson.get("id"), str):
+                title = translated(lesson.get("title"), payload.locale)
+                places[lesson["id"]] = (f"{module} · {word} {number} · {title}", chapter.get("id"))
+    return places
+
+
+async def notes(settings: Settings, authorization: str, payload: StudentAssistantRequest) -> dict:
+    """The Student's own notes on readings and class meetings, newest first: where each one
+    is, what it says and when it was saved, with buttons that open the readings."""
+    id_ = payload.locale == "id"
+    data = await learning_data(settings, authorization, "/api/v1/learning/notes/mine")
+    lessons, meetings = data.get("lessons"), data.get("meetings")
+    if not isinstance(lessons, list) or not isinstance(meetings, list):
+        raise HTTPException(503, "Student notes unavailable")
+    for item, ids in [(i, ("courseId", "lessonId")) for i in lessons] + [
+        (i, ("classId", "meetingId")) for i in meetings
+    ]:
+        if (
+            not isinstance(item, dict)
+            or not _ids(*(item.get(k) for k in ids))
+            or not isinstance(item.get("text"), str)
+            or type(item.get("updatedAt")) is not int
+        ):
+            raise HTTPException(503, "Student notes unavailable")
+    if len(lessons) > 50 or len(meetings) > 50:
+        raise HTTPException(503, "Student notes unavailable")
+    source = "Catatanmu sendiri" if id_ else "Your own notes"
+    if not lessons and not meetings:
+        return reply(
+            "Kamu belum punya catatan. Tulis catatan di kotak Catatan saat membaca materi, atau "
+            "di tab Catatan pertemuan kelas."
+            if id_
+            else "You have no notes yet. Write one in the Notes box of a reading, or in the "
+            "Notes tab of a class meeting.",
+            source,
+            ["lessons"],
+        )
+    # shortcut: at most 15 modules looked up; notes in other modules show without a place.
+    course_ids = list(dict.fromkeys(i["courseId"] for i in lessons))[:15]
+    found = await asyncio.gather(
+        *(lesson_places(settings, authorization, payload, c) for c in course_ids)
+    )
+    places = dict(zip(course_ids, found))
+    timetable: dict[str, str] = {}
+    if meetings:
+        # The timetable default window (a month back, three ahead) names recent meetings.
+        meeting_data = await learning_data(
+            settings,
+            authorization,
+            "/api/v1/learning/class-meetings",
+            {"class_id": payload.class_id},
+        )
+        for m in meeting_data.get("items") or []:
+            if (
+                isinstance(m, dict)
+                and isinstance(m.get("id"), str)
+                and isinstance(m.get("title"), str)
+                and type(m.get("starts_at")) is int
+            ):
+                timetable[m["id"]] = (
+                    f"{'Kelas' if id_ else 'Class'} {meeting_title(m['title'], payload.locale)}"
+                    f" · {jakarta_day(m['starts_at'], payload.locale)}"
+                )
+    rows, actions = [], []
+    for item in lessons:
+        place = places.get(item["courseId"], {}).get(item["lessonId"])
+        where = (
+            place[0] if place else ("Bacaan di modul lain" if id_ else "Reading in another module")
+        )
+        rows.append((item["updatedAt"], where, item["text"]))
+        if place:
+            action = open_action(place[0], item["courseId"], place[1], item["lessonId"])
+            if action:
+                actions.append(action)
+    for item in meetings:
+        where = timetable.get(item["meetingId"]) or ("Pertemuan kelas" if id_ else "Class meeting")
+        rows.append((item["updatedAt"], where, item["text"]))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    text = (
+        f"Kamu punya {len(lessons)} catatan di bacaan dan {len(meetings)} catatan di pertemuan "
+        "kelas. Ini yang terbaru:"
+        if id_
+        else f"You have {len(lessons)} reading note(s) and {len(meetings)} class meeting "
+        "note(s). The latest:"
+    )
+    table = {
+        "columns": ["Catatan di", "Isi", "Disimpan"] if id_ else ["Where", "Note", "Saved"],
+        "rows": [
+            [short(where), short(note, 280), jakarta_day(at, payload.locale)]
+            for at, where, note in rows[:20]
+        ],
+    }
+    return reply(text, source, [] if actions else ["lessons"], table, actions)
+
+
 def is_practice_completion(key: object, award: object) -> bool:
     """Completed 3D practice games (`practice:`) and completed question games (`complete:`);
     per-question checkpoints and trophies are not games."""
