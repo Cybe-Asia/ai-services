@@ -139,7 +139,9 @@ def planner_prompt(today: date, reading_open: bool) -> str:
         "extracurricular (clubs/ekskul they joined or can join, and club practice times); "
         "search (find learning material on a topic, or which chapter/module a topic is in, "
         "e.g. 'di bab berapa', 'ada di mana'; topic = the subject words only); "
-        "explain (explain a school concept; topic = the concept words"
+        "explain (explain a school concept, or answer a short school-subject question such "
+        "as a calculation, e.g. '10 + 5', 'berapa 12 x 8?', or a definition; topic = the "
+        "concept words, for a calculation the operation, e.g. 'penjumlahan'"
         + ("; a reading is open, so explain that reading" if reading_open else "")
         + "); smalltalk (greetings, thanks, chit-chat with Kibo, light fun requests such as a "
         "pantun or a joke); "

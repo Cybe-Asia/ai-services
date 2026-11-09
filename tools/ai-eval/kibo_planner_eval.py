@@ -202,6 +202,18 @@ CASES = json.loads(r"""[
   "explain"
  ],
  [
+  "10 + 5",
+  "explain"
+ ],
+ [
+  "berapa 12 x 8?",
+  "explain"
+ ],
+ [
+  "cuaca hari ini",
+  "unsupported"
+ ],
+ [
   "halo kibo",
   "smalltalk"
  ],

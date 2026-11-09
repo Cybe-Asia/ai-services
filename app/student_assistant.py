@@ -78,6 +78,8 @@ def topic_system_prompt(locale: str) -> str:
         "teacher-published readings of the student's own modules that mention it. Explain it "
         "from all of them together; a reading that only mentions the concept in passing still "
         "counts. Set answered=true and general=false when the readings are enough. "
+        "A short calculation is a school-subject question too: give the result with the "
+        "steps in one or two lines. "
         "When they are not enough (or there are none) and the question is about a concept of a "
         "school subject (science, mathematics, languages, social studies, religion, arts, "
         "technology), complete it briefly from general knowledge at the student's level and set "
