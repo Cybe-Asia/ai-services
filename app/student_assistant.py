@@ -1246,17 +1246,19 @@ async def search_lessons(
             source,
             ["lessons"],
         )
+    actions = [action for _, action in hits if action]
     return reply(
         f'Kibo menemukan {len(hits)} materi tentang "{query}":'
         if id_
         else f'Kibo found {len(hits)} result(s) about "{query}":',
         source,
-        ["lessons"],
+        # A chapter button opens the exact place; the generic Lessons button would not.
+        [] if actions else ["lessons"],
         {
             "columns": ["Modul", "Bab", "Pelajaran"] if id_ else ["Module", "Chapter", "Reading"],
             "rows": [row for row, _ in hits[:20]],
         },
-        [action for _, action in hits if action],
+        actions,
     )
 
 
@@ -1414,6 +1416,7 @@ async def explain_topic(
         result = reply(verdict.text.strip(), source, ["lessons"])
     if hits:
         result["reply"]["actions"] = hits[:5]
+        result["reply"]["destinations"] = []
     return result
 
 

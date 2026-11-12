@@ -841,6 +841,8 @@ def test_search_finds_the_chapter_and_opens_it_in_lessons(api, monkeypatch):
             "lesson_id": "l2",
         }
     ]
+    # The chapter button replaces the generic Lessons button, which opens no chapter.
+    assert body["destinations"] == []
     assert all(params == {"class_id": "class-one"} for _, params in paths)
     body = ask(api, "integral tentu materi").json()["reply"]
     assert body["actions"][0]["lesson_id"] == "l3"
