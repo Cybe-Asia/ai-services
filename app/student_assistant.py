@@ -930,6 +930,7 @@ async def find_lessons(
     if not isinstance(items, list) or len(items) > 50:
         raise HTTPException(503, "Student courses unavailable")
     hits = []
+    named = []  # the hits of modules whose own title names the topic ("sejarah")
     # shortcut: first catalogue page, at most 15 modules read; enough for one class's subjects.
     ids = [item.get("id") if isinstance(item, dict) else None for item in items[:15]]
     if not all(isinstance(i, str) and re.match(ID_PATTERN, i) for i in ids):
@@ -986,7 +987,13 @@ async def find_lessons(
                     found = (lesson.get("id"), translated(title, payload.locale))
                     break
             if found or all(t in chapter_text.casefold() for t in terms):
-                hits.append(lesson_hit(payload, course_id, module, number, chapter, found))
+                hit = lesson_hit(payload, course_id, module, number, chapter, found)
+                hits.append(hit)
+                if terms and all(t in module_text.casefold() for t in terms):
+                    named.append(hit)
+    # A subject's own module beats readings of other modules that merely mention the word.
+    if named:
+        return named
     if hits or not terms:
         return hits
     # No title names the topic: Learning says which readings' text does (published, chapters

@@ -1847,3 +1847,41 @@ def test_no_notes_says_where_to_write_one(api, monkeypatch, agent):
     body = ask(api, "catatanku mana").json()["reply"]
     assert body["text"].startswith("Kamu belum punya catatan.")
     assert paths == ["/api/v1/learning/notes/mine"]
+
+
+def test_subject_name_lists_that_modules_chapters_not_readings_elsewhere(api, monkeypatch):
+    geo = {
+        "id": "geo",
+        "title": {"en": "Geography 10", "id": "Geografi Kelas 10"},
+        "chapters": [
+            {
+                "id": "geo-1",
+                "title": {"en": "Basics", "id": "Dasar-Dasar Geografi"},
+                "lessons": [{"id": "g1", "title": {"en": "History", "id": "Sejarah Geografi"}}],
+            }
+        ],
+    }
+    history = {
+        "id": "his",
+        "title": {"en": "History 10", "id": "Sejarah Kelas 10"},
+        "chapters": [
+            {
+                "id": f"his-{n}",
+                "title": {"en": f"Chapter {n}", "id": f"Bab sejarah {n}"},
+                "lessons": [{"id": f"h{n}", "title": {"en": "Reading", "id": "Bacaan"}}],
+            }
+            for n in (1, 2)
+        ],
+    }
+
+    async def data(settings, authorization, path, params=None):
+        if path == "/api/v1/learning/curriculum/courses":
+            return {"items": [{"id": "geo"}, {"id": "his"}], "next": None}
+        return geo if path.endswith("/geo") else history
+
+    monkeypatch.setattr(student_assistant, "learning_data", data)
+    response = ask(api, "cariin dong materi sejarah")
+    assert response.status_code == 200, response.text
+    body = response.json()["reply"]
+    assert [row[0] for row in body["table"]["rows"]] == ["Sejarah Kelas 10"] * 2
+    assert [a["chapter_id"] for a in body["actions"]] == ["his-1", "his-2"]
